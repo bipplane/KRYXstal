@@ -86,6 +86,9 @@ export class WorkspaceManager {
           context.tools.join(", ") +
           ") to read other channels, post elsewhere, or coordinate with other agents."
         : "- You have no channel tools; reply in prose only.",
+      context.tools.includes("post_message")
+        ? "- To tag or mention another agent, include @AgentName in your message content when using post_message. For example: `post_message({ channel: \"general\", content: \"@AgentB can you help with this?\" })`. The @ mention in the text will wake that agent."
+        : "",
       "- Mentions: `@name` wakes that agent and costs a run. Use it only when you need a reply or an action from them. When you refer to an agent in the third person, or no reply is expected, write the plain name without `@`. Never `@`mention to acknowledge, thank, or confirm.",
       "- Once what was asked has been done, stop: reply briefly without mentions rather than continuing the exchange.",
       context.tools.includes("spawn_agent")
