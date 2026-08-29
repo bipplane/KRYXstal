@@ -58,6 +58,8 @@ const identity = (agentId: string, runId = "run-" + agentId.slice(0, 8)): RunIde
   expiresAt: Date.now() + 60_000,
 });
 
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
 async function rejection(promise: Promise<unknown>): Promise<HttpError> {
   try {
     await promise;
@@ -218,6 +220,10 @@ describe("Channel synchronisation: automatic reply", () => {
         const seen = prompts.get(me.name) ?? [];
         seen.push(request.prompt);
         prompts.set(me.name, seen);
+        // Each agent answers the human once; a later turn (turn-taking) has nothing to add.
+        if (seen.length > 2 || (me.name === "AgentA" && seen.length > 1)) {
+          return { output: "[no reply]", threadId: me.name, usage: null };
+        }
         if (me.name === "AgentA") return { output: "10", threadId: "a", usage: null };
         if (seen.length === 1) {
           // AgentB is slower: it only answers once AgentA's "10" has landed.
@@ -351,5 +357,108 @@ describe("Channel synchronisation: automatic reply", () => {
     expect(sync.locks.holderOf(channelKey(general.id))).toBeNull();
     const posted = await service.agentPostMessage(identity(a.id), "general", "after recovery");
     expect(posted.content).toBe("after recovery");
+  });
+});
+
+describe("Turn-taking", () => {
+  it("wakes the next participant of a collaboration without a mention, and nobody outside it", async () => {
+    let service!: AgentService;
+    const runner: AgentRunner = {
+      run: async (request) => {
+        const me = service.getAgent(request.agentId);
+        if (request.prompt.includes("step 2")) return { output: "[no reply]", threadId: null, usage: null };
+        if (me.name === "AgentA") return { output: "step 1", threadId: null, usage: null };
+        if (request.prompt.includes("step 1")) return { output: "step 2", threadId: null, usage: null };
+        return { output: "[no reply]", threadId: null, usage: null };
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    };
+    ({ service } = await makeService(runner));
+    const a = await service.createAgent({ name: "AgentA" });
+    const b = await service.createAgent({ name: "AgentB" });
+    const c = await service.createAgent({ name: "AgentC" });
+    const general = service.getChannelByName("general");
+    const root = await service.postUserMessage(general.id, "@AgentA @AgentB take turns");
+    await expect.poll(() => service.getTrace(root.id).live === false && service.getRuns(a.id).length === 2, { timeout: 5_000 }).toBe(true);
+    await sleep(50);
+    expect(service.getRuns(a.id).map((run) => run.trigger)).toEqual(["channel", "channel"]);
+    expect(service.getRuns(b.id)).toHaveLength(2);
+    expect(service.getRuns(c.id)).toHaveLength(0);
+    expect(
+      service
+        .getMessages(general.id)
+        .filter((m) => m.kind === "message")
+        .map((m) => m.authorName + ":" + m.content),
+    ).toEqual(["You:@AgentA @AgentB take turns", "AgentA:step 1", "AgentB:step 2"]);
+    // The turn after "step 2" went to AgentA, who had nothing to add; the round ended there.
+    expect(service.getRuns(a.id)[0]).toMatchObject({ silent: true, output: "[no reply]" });
+    expect(service.getMessages(general.id).some((m) => m.content.startsWith("Paused"))).toBe(false);
+  });
+});
+
+describe("Countdown demo", () => {
+  it("N agents count down 10..1 exactly once each, in order, with visible conflicts", async () => {
+    const N = 3;
+    let service!: AgentService;
+    // A model's memory: what it has seen others post, and what it believes it posted itself.
+    const seenByOthers = new Map<string, Set<number>>();
+    const believedMine = new Map<string, Set<number>>();
+    let firstPrompts = 0;
+    const runner: AgentRunner = {
+      run: async (request) => {
+        const me = service.getAgent(request.agentId);
+        const seen = seenByOthers.get(me.id) ?? new Set<number>();
+        const mine = believedMine.get(me.id) ?? new Set<number>();
+        seenByOthers.set(me.id, seen);
+        believedMine.set(me.id, mine);
+        // Read the prompt the way a model would: what others posted, what beat me, what of mine was rejected.
+        for (const match of request.prompt.matchAll(/\] Agent\w+: (\d+)\s*$/gm)) seen.add(Number(match[1]));
+        for (const match of request.prompt.matchAll(/Agent\w+ posted "(\d+)"/g)) seen.add(Number(match[1]));
+        const rejected = /Your rejected reply was: "(\d+)"/.exec(request.prompt);
+        if (rejected) mine.delete(Number(rejected[1]));
+        if (!request.prompt.includes("was NOT posted") && request.prompt.includes("count down")) {
+          // Everyone answers the human at the same moment: a guaranteed race on "10".
+          firstPrompts += 1;
+          await expect.poll(() => firstPrompts >= N, { timeout: 5_000 }).toBe(true);
+        }
+        await sleep(Math.floor(Math.random() * 20));
+        const known = [...seen, ...mine];
+        const next = (known.length > 0 ? Math.min(...known) : 11) - 1;
+        if (next < 1) return { output: "[no reply]", threadId: null, usage: null };
+        mine.add(next); // believed posted until told otherwise
+        return { output: String(next), threadId: null, usage: null };
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    };
+    ({ service } = await makeService(runner));
+    for (let index = 0; index < N; index += 1) await service.createAgent({ name: "Agent" + "ABC"[index] });
+    const general = service.getChannelByName("general");
+    const root = await service.postUserMessage(
+      general.id,
+      "@everyone count down from 10 to 1, one number per message, take turns",
+    );
+    await expect
+      .poll(() => {
+        const trace = service.getTrace(root.id);
+        const last = service.getMessages(general.id).filter((m) => m.kind === "message").at(-1);
+        return !trace.live && last?.content === "1" && service.listAgents().every((agent) => agent.status === "ready");
+      }, { timeout: 20_000, interval: 50 })
+      .toBe(true);
+    await sleep(100);
+    const numbers = service
+      .getMessages(general.id)
+      .filter((m) => m.kind === "message" && m.authorKind !== "user")
+      .map((m) => m.content);
+    expect(numbers).toEqual(["10", "9", "8", "7", "6", "5", "4", "3", "2", "1"]);
+    const trace = service.getTrace(root.id);
+    expect(trace.messages.filter((m) => m.kind === "conflict").length).toBeGreaterThanOrEqual(N - 1);
+    expect(trace.runs.some((run) => run.trigger === "conflict")).toBe(true);
+    expect(trace.runs.length).toBeLessThanOrEqual(24);
+    expect(trace.messages.some((m) => m.content.startsWith("Paused"))).toBe(false);
+    // The judge-facing story is in the channel: who tried what, who got there first.
+    const notice = trace.messages.find((m) => m.kind === "conflict");
+    expect(notice?.content).toMatch(/Agent[ABC]'s reply "10" was not posted, but Agent[ABC] got there first with "10"/);
   });
 });

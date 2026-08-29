@@ -351,7 +351,7 @@ describe("Traces", () => {
       cancel: async () => false,
       isAvailable: async () => true,
     };
-    ({ service } = await makeService(runner));
+    ({ service } = await makeService(runner, { TRACE_BUDGET: "6" }));
     const test = await service.createChannel({ name: "test" });
     const a = await service.createAgent({ name: "AgentA", channelIds: [test.id] });
     const b = await service.createAgent({ name: "AgentB", channelIds: [test.id] });
@@ -413,7 +413,7 @@ describe("Trace budget", () => {
       cancel: async () => false,
       isAvailable: async () => true,
     };
-    ({ service } = await makeService(runner));
+    ({ service } = await makeService(runner, { TRACE_BUDGET: "6" }));
     await service.createAgent({ name: "Ping" });
     await service.createAgent({ name: "Pong" });
     const general = service.getChannelByName("general");

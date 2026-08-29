@@ -62,10 +62,7 @@ export const USER_ID = "user";
 const GENERAL_CHANNEL = "general";
 const APPROVALS_CHANNEL = "approvals";
 const MAX_SESSION_DEPTH = 3;
-/** Agent-to-agent turns allowed in one channel before a human has to speak again. */
-const CHATTER_BUDGET = 8;
-/** Agent runs one human prompt may cause in total (across channels) before pausing. */
-const TRACE_BUDGET = 6;
+// Chatter and trace budgets live in config (CHATTER_BUDGET, TRACE_BUDGET).
 /** Lost races one turn may hit (tool posts plus regenerated replies) before it is stopped. */
 export const MAX_CONFLICTS_PER_TURN = 3;
 const MAX_DECISIONS = 2_000;
@@ -1442,7 +1439,15 @@ export class AgentService {
 
   // --------------------------------------------------------------- scheduler
 
-  /** Wakes members that a message addresses: everyone in a DM, @mentions elsewhere. */
+  /**
+   * Wakes members that a message addresses: everyone in a DM, @mentions
+   * elsewhere — plus, inside a collaboration, the next participant in turn.
+   * A collaboration is a trace with two or more agents that have already run
+   * in this channel; an agent's message there also wakes the participant after
+   * the author (round-robin by first run), so agents take turns without
+   * having to @mention each other. Agents outside the collaboration still
+   * need a mention; a `[no reply]` ends the round because nothing is posted.
+   */
   private async wakeMembers(
     channelId: string,
     message: ChannelMessage,
@@ -1454,8 +1459,8 @@ export class AgentService {
     if (!fromHuman && !force) {
       const used = (this.chatter.get(channelId) ?? 0) + 1;
       this.chatter.set(channelId, used);
-      if (used > CHATTER_BUDGET) {
-        if (used === CHATTER_BUDGET + 1) {
+      if (used > this.config.chatterBudget) {
+        if (used === this.config.chatterBudget + 1) {
           await this.store.mutate((db) =>
             this.appendMessage(db, channelId, {
               authorId: "system",
@@ -1463,7 +1468,9 @@ export class AgentService {
               authorKind: "system",
               kind: "system",
               content:
-                "Paused: " + CHATTER_BUDGET + " agent turns without a human message. Post to resume.",
+                "Paused: " +
+                String(this.config.chatterBudget) +
+                " agent turns without a human message. Post to resume.",
               runId: null,
               approvalId: null,
             }),
@@ -1472,12 +1479,19 @@ export class AgentService {
         return;
       }
     }
+    const nextInTurn =
+      !fromHuman && !force && channel.kind !== "dm"
+        ? this.nextParticipant(database, channel.id, message)
+        : null;
     for (const memberId of channel.memberIds) {
       if (memberId === USER_ID || memberId === message.authorId) continue;
       const agent = database.agents.find((item) => item.id === memberId);
       if (!agent || agent.status === "stopped" || agent.status === "closed") continue;
       const addressed =
-        force || channel.kind === "dm" || mentions(message.content, agent.name, database.agents);
+        force ||
+        channel.kind === "dm" ||
+        memberId === nextInTurn ||
+        mentions(message.content, agent.name, database.agents);
       if (!addressed) continue;
       if (evaluate(agent.policy, "channel:read", "channel:" + channel.name).effect !== "allow") {
         continue;
@@ -1486,11 +1500,33 @@ export class AgentService {
     }
   }
 
+  /** The participant whose turn follows the author's, or null outside a collaboration. */
+  private nextParticipant(
+    database: Readonly<Database>,
+    channelId: string,
+    message: ChannelMessage,
+  ): string | null {
+    const order: string[] = [];
+    for (const run of [...database.runs]
+      .filter((run) => run.traceId === message.traceId && run.channelId === channelId)
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))) {
+      if (!order.includes(run.agentId)) order.push(run.agentId);
+    }
+    if (order.length < 2) return null;
+    const index = order.indexOf(message.authorId);
+    for (let step = 0; step < order.length; step += 1) {
+      const candidate = order[(index + 1 + step) % order.length];
+      if (candidate && candidate !== message.authorId) return candidate;
+    }
+    return null;
+  }
+
   /** True (and posts a notice once) when one prompt has already caused TRACE_BUDGET runs. */
   private async traceExhausted(trigger: ChannelMessage, channelId: string): Promise<boolean> {
+    const budget = this.config.traceBudget;
     const runs = this.store.peek().runs.filter((run) => run.traceId === trigger.traceId).length;
-    if (runs < TRACE_BUDGET) return false;
-    if (runs === TRACE_BUDGET && !this.traceNotices.has(trigger.traceId)) {
+    if (runs < budget) return false;
+    if (runs === budget && !this.traceNotices.has(trigger.traceId)) {
       this.traceNotices.add(trigger.traceId);
       await this.store.mutate((database) =>
         this.appendMessage(database, channelId, {
@@ -1500,7 +1536,7 @@ export class AgentService {
           kind: "system",
           content:
             "Paused: this prompt already caused " +
-            TRACE_BUDGET +
+            String(budget) +
             " agent runs. Post a new message to continue.",
           runId: null,
           approvalId: null,
@@ -1647,7 +1683,7 @@ export class AgentService {
             '". This chain has already used ' +
             runsSoFar +
             " of " +
-            TRACE_BUDGET +
+            String(this.config.traceBudget) +
             " agent runs.",
         );
       }
