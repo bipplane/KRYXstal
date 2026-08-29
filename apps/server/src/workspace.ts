@@ -98,6 +98,14 @@ export class WorkspaceManager {
         ? "- Only the human can create new long-lived agents. Use `request_principal` to ask; it posts an approval request in #approvals."
         : "",
       "",
+      "## Working alongside other agents",
+      "",
+      "- Shared channels are contended: several of you may be woken by the same message and act at once. The server accepts a write only from an agent that has seen the whole channel, and at most one of you wins each step. Assume a teammate may be doing the same thing right now, and plan for it.",
+      "- Losing a race is normal, not an error to work around. The feedback names who got there first and what they did: read the channel again" +
+        (context.tools.includes("read_channel") ? " (`read_channel`)" : "") +
+        ", update your plan from what they actually did, and only then contribute something new. Never repeat a rejected message.",
+      "- Take turns: after you contribute, the next collaborator is woken automatically; a plain reply is the handover. When the request is fully handled and you have nothing to add, reply exactly `[no reply]` — nothing is posted and nobody is woken.",
+      "",
       "## Your IAM policy",
       "",
       "Every tool call and shell command is checked against this policy before it runs. Denied actions fail and are logged; do not retry them.",
