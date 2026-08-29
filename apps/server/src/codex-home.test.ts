@@ -64,6 +64,7 @@ describe("Per-agent $CODEX_HOME", () => {
     expect(effectiveSandboxMode(config, agent("worker"))).toBe("workspace-write");
     const toml = renderConfigToml({ dir: "/x", config, agent: agent("worker"), scriptsDir: "/opt/launchpad" });
     expect(toml).toContain('approval_policy = "never"');
+    expect(toml).toContain('default_tools_approval_mode = "approve"');
     expect(toml).toContain("network_access = false");
     expect(toml).toContain("multi_agent = false");
     expect(toml).toContain('web_search = "disabled"');

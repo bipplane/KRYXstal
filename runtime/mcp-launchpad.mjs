@@ -14,11 +14,13 @@ const TOOLS = [
   {
     name: "list_channels",
     description: "List the channels this agent can see, with member names and descriptions.",
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "read_channel",
     description: "Read the most recent messages in a channel.",
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     inputSchema: {
       type: "object",
       properties: {
@@ -33,6 +35,7 @@ const TOOLS = [
     name: "post_message",
     description:
       "Post a message to a channel as yourself. Mention another agent with @name to wake it.",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     inputSchema: {
       type: "object",
       properties: {

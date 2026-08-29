@@ -100,7 +100,8 @@ export function renderConfigToml(input: CodexHomeInput): string {
       "args = [" + toml(path.posix.join(scriptsDir, "mcp-launchpad.mjs")) + "]",
       'env_vars = ["LAUNCHPAD_URL", "AGENT_TOKEN"]',
       "enabled_tools = [" + tools.map(toml).join(", ") + "]",
-      'default_tools_approval_mode = "auto"',
+      // Authorisation is the hook's job; Codex itself must never prompt (exec runs with approval_policy = never).
+      'default_tools_approval_mode = "approve"',
       "startup_timeout_sec = 20",
       "tool_timeout_sec = 120",
       "",
