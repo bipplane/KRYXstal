@@ -11,7 +11,8 @@ credentials, personal data, or exploit details in an issue.
 
 ## Known limitations
 
-- Shared demo token; no user identity, authorization, RBAC, or tenant isolation
+- Shared demo token; no human user identity, RBAC, tenancy, or ownership isolation.
+  Agent IAM exists, but it does not authenticate or separate human users.
 - No CSRF protection
 - No per-Agent container boundary in ECS mode
 - Ordinary local containers, not hardened multi-tenant sandboxes
