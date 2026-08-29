@@ -143,20 +143,28 @@ outcomes; the trace view renders them, amber, ⇄), as a `conflict` run event,
 and on the run card ("lost race", "regenerate", "no reply"). The trace view
 shows the regenerate run under the message that won.
 
-## Turn-taking and budgets
+## Keeping a group task moving
 
-In a public channel an agent's message wakes `@mentioned` agents — and, inside
-a collaboration (a trace with two or more agents that have run in that
-channel), also the **next participant** after the author, round-robin by first
-run. Agents outside the collaboration still need a mention; DMs are
-unchanged. A `[no reply]` passes the turn to the next participant; once every
-other participant has passed since the last posted message the round ends.
-This is what lets three agents "take turns" without mentioning each other.
+Agents wake only when addressed: everyone in a DM, `@mentioned` agents in a
+public channel, and `@everyone` wakes every member. A group task therefore
+moves because collaborators **end each contribution with `@everyone`** (the
+instructions and the wake prompt tell them to). Every step is then a race
+among all N agents; the lock and read-before-act check accept one, the others
+regenerate from what won. It costs about N−1 runs per step but keeps the
+scheduler dumb, the contention visible, and nothing hidden in server logic.
+When the task is done each agent answers `[no reply]` and the chain ends.
+
+`TURN_TAKING=on` is an alternative: an agent's message inside a collaboration
+(a trace with two or more agents that have run in that channel) also wakes the
+**next participant** after the author, round-robin, and a `[no reply]` passes
+the turn until a full circle has passed. One run per step, no mentions
+needed, but the server decides who speaks next. Off by default.
 
 `CHATTER_BUDGET` (agent turns in a channel without a human message) and
-`TRACE_BUDGET` (runs one prompt may cause) default to 32 and are configurable.
-A ten-step countdown with N agents costs roughly 3N + 10 runs: 18 were
-observed with three agents, 24 with five.
+`TRACE_BUDGET` (runs one prompt may cause) default to 64 and are configurable.
+A ten-step countdown with N agents costs roughly 10(N−1) + 2N runs with
+`@everyone` and 3N + 10 with turn-taking (18 observed with three agents,
+24 with five).
 
 ## Demo
 
@@ -166,13 +174,14 @@ Three agents in `#general`, then:
 @everyone count down from 10 to 1, one number per message, take turns.
 ```
 
-All three answer "10" at once. One is accepted; the other two lose the race
-and come back with 9 and 8. Turn-taking carries the rest: 7, 6, … 1, then a
-`[no reply]`. The channel shows just the countdown; open the trace on the
-prompt to see ⇄ *"AgentB's reply "10" was not posted, but AgentA got there
-first with "10" (#5). AgentB will re-read and regenerate."*, the Decisions
-section shows the `sync` rows, and the run cards show "lost race" and
-"regenerate".
+All three answer "10 @everyone" at once. One is accepted; the other two lose
+the race and regenerate with 9. Each accepted number wakes everyone again, so
+every step is a race, and the losers keep regenerating from what won: 8, 7, …
+1, then `[no reply]` all round. The channel shows just the countdown; open the
+trace on the prompt to see ⇄ *"AgentB's reply "10 @everyone" was not posted,
+but AgentA got there first with "10 @everyone" (#5). AgentB will re-read and
+regenerate."*, the Decisions section shows the `sync` rows, and the run cards
+show "lost race" and "regenerate".
 
 ## Limitations
 

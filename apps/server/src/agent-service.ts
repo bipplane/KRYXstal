@@ -1589,12 +1589,11 @@ export class AgentService {
 
   /**
    * Wakes members that a message addresses: everyone in a DM, @mentions
-   * elsewhere — plus, inside a collaboration, the next participant in turn.
-   * A collaboration is a trace with two or more agents that have already run
-   * in this channel; an agent's message there also wakes the participant after
-   * the author (round-robin by first run), so agents take turns without
-   * having to @mention each other. Agents outside the collaboration still
-   * need a mention; a `[no reply]` ends the round because nothing is posted.
+   * elsewhere (`@everyone` wakes every member, which is how collaborators hand
+   * the next step to the whole group). With TURN_TAKING=on, an agent's message
+   * inside a collaboration — a trace with two or more agents that have already
+   * run in this channel — also wakes the participant after the author
+   * (round-robin by first run), so agents take turns without mentions.
    */
   private async wakeMembers(
     channelId: string,
@@ -1628,7 +1627,7 @@ export class AgentService {
       }
     }
     const nextInTurn =
-      !fromHuman && !force && channel.kind !== "dm"
+      this.config.turnTaking && !fromHuman && !force && channel.kind !== "dm"
         ? this.nextParticipant(database, channel.id, message)
         : null;
     for (const memberId of channel.memberIds) {
@@ -1688,7 +1687,7 @@ export class AgentService {
    * participant has passed since the last posted message, the round is over.
    */
   private async passTurn(agent: Agent, run: AgentRun): Promise<void> {
-    if (!run.channelId || !run.traceId) return;
+    if (!this.config.turnTaking || !run.channelId || !run.traceId) return;
     const database = this.store.peek();
     const channel = database.channels.find((item) => item.id === run.channelId);
     if (!channel || channel.kind === "dm") return;
@@ -1898,11 +1897,18 @@ export class AgentService {
     }
     if (chain.length > 0) sections.push(...chain, "");
     const offerSilence = conflict !== null || trigger?.authorKind !== "user";
+    const groupTask =
+      channel.kind !== "dm" &&
+      !this.config.turnTaking &&
+      (conflict !== null || trigger?.authorKind !== "user" || mentions(trigger?.content ?? "", "everyone", []));
     sections.push(
       (conflict ? "Reply with your regenerated contribution. It" : "Respond to these messages. Your reply") +
         " is posted to #" +
         channel.name +
         " automatically; use the launchpad tools only to act elsewhere or coordinate with other agents." +
+        (groupTask
+          ? " If this is a shared task that still has steps left, end your reply with @everyone so the others are woken for the next step."
+          : "") +
         (offerSilence
           ? " If there is nothing useful to add, reply exactly " + NO_REPLY + " and nothing is posted."
           : ""),
@@ -2205,6 +2211,7 @@ export class AgentService {
         .map((channel) => channel.name),
       parentName: parent?.name ?? null,
       tools: enabledMcpTools(agent),
+      turnTaking: this.config.turnTaking,
     };
   }
 

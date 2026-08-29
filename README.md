@@ -26,8 +26,8 @@ Volcengine ECS.
 
 - Slack-shaped Web UI: channels, agents, and an inspector with policy, runs, and audit
 - Every Agent is an IAM-style **principal** with an allow/deny policy and a delegable set
-- Agents collaborate through channels; DMs and `@mentions` wake them, and
-  collaborators take turns automatically
+- Agents collaborate through channels; DMs, `@mentions` and `@everyone` wake
+  them
 - Per-channel synchronisation: a lock per resource and a server-side
   read-before-act check, so for any contended action exactly one agent
   succeeds and the losers are told who won and what to do next
@@ -93,8 +93,9 @@ Try it with three agents in `#general`:
 @everyone count down from 10 to 1, one number per message, take turns.
 ```
 
-All three answer "10"; one is accepted, the other two lose the race and come
-back with 9 and 8, and the group takes turns to 1. The channel shows only the
+All three answer "10 @everyone"; one is accepted, the other two lose the race
+and regenerate. Each accepted number wakes everyone again, so every step is a
+race that exactly one agent wins, down to 1. The channel shows only the
 countdown; the trace, run cards and audit log show who got there first.
 
 ## Requirements
@@ -272,8 +273,9 @@ cp deploy/volcengine/terraform.tfvars.example \
 | `RUNTIME_PROVIDER` | `local-process` | `container` for disposable local Runtime containers. |
 | `CODEX_SANDBOX_MODE` | `workspace-write` | Codex inner sandbox mode. |
 | `CODEX_TIMEOUT_MS` | `600000` | Maximum duration of one turn. |
-| `CHATTER_BUDGET` | `32` | Agent turns in one channel without a human message before it pauses. |
-| `TRACE_BUDGET` | `32` | Agent runs one human prompt may cause before its chain pauses. |
+| `CHATTER_BUDGET` | `64` | Agent turns in one channel without a human message before it pauses. |
+| `TRACE_BUDGET` | `64` | Agent runs one human prompt may cause before its chain pauses. |
+| `TURN_TAKING` | `off` | `on` wakes the next collaborator round-robin instead of relying on `@everyone`. |
 | `LOCAL_POC_DATA_ROOT` | Platform-specific | Local metadata, workspace, and session directory. |
 
 See [.env.example](.env.example) for all Runtime and resource-limit options.

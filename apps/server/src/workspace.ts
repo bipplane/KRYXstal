@@ -9,6 +9,8 @@ export interface InstructionContext {
   parentName: string | null;
   /** MCP tools available to this agent. */
   tools: string[];
+  /** True when the server wakes the next participant round-robin (TURN_TAKING=on). */
+  turnTaking: boolean;
 }
 
 export class WorkspaceManager {
@@ -104,7 +106,9 @@ export class WorkspaceManager {
       "- Losing a race is normal, not an error to work around. The feedback names who got there first and what they did: read the channel again" +
         (context.tools.includes("read_channel") ? " (`read_channel`)" : "") +
         ", update your plan from what they actually did, and only then contribute something new. Never repeat a rejected message.",
-      "- Take turns: after you contribute, the next collaborator is woken automatically; a plain reply is the handover. When the request is fully handled and you have nothing to add, reply exactly `[no reply]` — nothing is posted and nobody is woken.",
+      context.turnTaking
+        ? "- Take turns: after you contribute, the next collaborator is woken automatically; a plain reply is the handover. When the request is fully handled and you have nothing to add, reply exactly `[no reply]` — nothing is posted and nobody is woken."
+        : "- Shared tasks move only when someone is woken. When you contribute a step to a group task, end your message with `@everyone` so the whole group is woken for the next step; expect several of you to attempt it and the server to accept one. When the request is fully handled and you have nothing to add, reply exactly `[no reply]` — nothing is posted and nobody is woken.",
       "",
       "## Your IAM policy",
       "",

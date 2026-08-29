@@ -30,6 +30,7 @@ const idleRunner: AgentRunner = {
 async function makeService(
   runner: AgentRunner = idleRunner,
   sync: SyncBackend = createInMemorySync(),
+  env: Record<string, string> = {},
 ): Promise<{ service: AgentService; sync: SyncBackend }> {
   const root = await mkdtemp(path.join(tmpdir(), "launchpad-sync-test-"));
   temporaryDirectories.push(root);
@@ -40,6 +41,7 @@ async function makeService(
     CODEX_HOME: path.join(root, "codex"),
     ARK_API_KEY: "test-key",
     ARK_MODEL: "ep-test",
+    ...env,
   });
   const service = new AgentService(
     config,
@@ -360,7 +362,7 @@ describe("Channel synchronisation: automatic reply", () => {
   });
 });
 
-describe("Turn-taking", () => {
+describe("Turn-taking (TURN_TAKING=on)", () => {
   it("wakes the next participant of a collaboration without a mention, and nobody outside it", async () => {
     let service!: AgentService;
     const runner: AgentRunner = {
@@ -374,7 +376,7 @@ describe("Turn-taking", () => {
       cancel: async () => false,
       isAvailable: async () => true,
     };
-    ({ service } = await makeService(runner));
+    ({ service } = await makeService(runner, createInMemorySync(), { TURN_TAKING: "on" }));
     const a = await service.createAgent({ name: "AgentA" });
     const b = await service.createAgent({ name: "AgentB" });
     const c = await service.createAgent({ name: "AgentC" });
@@ -395,9 +397,32 @@ describe("Turn-taking", () => {
     expect(service.getRuns(a.id)[0]).toMatchObject({ silent: true, output: "[no reply]" });
     expect(service.getMessages(general.id).some((m) => m.content.startsWith("Paused"))).toBe(false);
   });
+
+  it("is off by default: an unmentioned reply wakes nobody", async () => {
+    let service!: AgentService;
+    const runner: AgentRunner = {
+      run: async (request) => ({
+        output: service.getAgent(request.agentId).name === "AgentA" ? "step 1" : "[no reply]",
+        threadId: null,
+        usage: null,
+      }),
+      cancel: async () => false,
+      isAvailable: async () => true,
+    };
+    ({ service } = await makeService(runner));
+    const a = await service.createAgent({ name: "AgentA" });
+    const b = await service.createAgent({ name: "AgentB" });
+    const general = service.getChannelByName("general");
+    const root = await service.postUserMessage(general.id, "@AgentA @AgentB take turns");
+    await expect.poll(() => !service.getTrace(root.id).live, { timeout: 5_000 }).toBe(true);
+    await sleep(100);
+    expect(service.getRuns(a.id)).toHaveLength(1);
+    expect(service.getRuns(b.id)).toHaveLength(1);
+    expect(service.getTrace(root.id).runs).toHaveLength(2);
+  });
 });
 
-describe("Passing the turn", () => {
+describe("Passing the turn (TURN_TAKING=on)", () => {
   it("hands a silent turn to the next participant and ends the round after a full circle", async () => {
     let service!: AgentService;
     const general = () => service.getChannelByName("general").id;
@@ -418,7 +443,7 @@ describe("Passing the turn", () => {
       cancel: async () => false,
       isAvailable: async () => true,
     };
-    ({ service } = await makeService(runner));
+    ({ service } = await makeService(runner, createInMemorySync(), { TURN_TAKING: "on" }));
     const a = await service.createAgent({ name: "AgentA" });
     const b = await service.createAgent({ name: "AgentB" });
     const c = await service.createAgent({ name: "AgentC" });
@@ -444,69 +469,99 @@ describe("Passing the turn", () => {
   });
 });
 
+/**
+ * A fake model for the countdown. It reads its prompt the way a model would —
+ * numbers other agents posted, what beat it, what of its own was rejected —
+ * and answers the next number, ending with @everyone when asked to, or
+ * "[no reply]" once the countdown is done. A barrier makes every agent answer
+ * the human at the same instant, so the race on "10" is guaranteed.
+ */
+function countdownRunner(
+  getService: () => AgentService,
+  N: number,
+  suffix: string,
+): AgentRunner {
+  const seenByOthers = new Map<string, Set<number>>();
+  const believedMine = new Map<string, Set<number>>();
+  let firstPrompts = 0;
+  return {
+    run: async (request) => {
+      const service = getService();
+      const me = service.getAgent(request.agentId);
+      const seen = seenByOthers.get(me.id) ?? new Set<number>();
+      const mine = believedMine.get(me.id) ?? new Set<number>();
+      seenByOthers.set(me.id, seen);
+      believedMine.set(me.id, mine);
+      for (const match of request.prompt.matchAll(/\] Agent\w+: (\d+)/g)) seen.add(Number(match[1]));
+      for (const match of request.prompt.matchAll(/Agent\w+ posted "(\d+)/g)) seen.add(Number(match[1]));
+      const rejected = /Your rejected reply was: "(\d+)/.exec(request.prompt);
+      if (rejected) mine.delete(Number(rejected[1]));
+      if (!request.prompt.includes("was NOT posted") && request.prompt.includes("] You: ")) {
+        firstPrompts += 1;
+        await expect.poll(() => firstPrompts >= N, { timeout: 5_000 }).toBe(true);
+      }
+      await sleep(Math.floor(Math.random() * 20));
+      const known = [...seen, ...mine];
+      const next = (known.length > 0 ? Math.min(...known) : 11) - 1;
+      if (next < 1) return { output: "[no reply]", threadId: null, usage: null };
+      mine.add(next);
+      return { output: String(next) + suffix, threadId: null, usage: null };
+    },
+    cancel: async () => false,
+    isAvailable: async () => true,
+  };
+}
+
+async function runCountdown(
+  service: AgentService,
+  N: number,
+): Promise<{ numbers: number[]; trace: ReturnType<AgentService["getTrace"]> }> {
+  for (let index = 0; index < N; index += 1) await service.createAgent({ name: "Agent" + "ABCDE"[index] });
+  const general = service.getChannelByName("general");
+  const root = await service.postUserMessage(
+    general.id,
+    "@everyone count down from 10 to 1, one number per message, take turns",
+  );
+  await expect
+    .poll(() => {
+      const trace = service.getTrace(root.id);
+      const last = service.getMessages(general.id).filter((m) => m.kind === "message").at(-1);
+      return !trace.live && /^1\b/.test(last?.content ?? "") && service.listAgents().every((agent) => agent.status === "ready");
+    }, { timeout: 30_000, interval: 50 })
+    .toBe(true);
+  await sleep(150);
+  const numbers = service
+    .getMessages(general.id)
+    .filter((m) => m.kind === "message" && m.authorKind !== "user")
+    .map((m) => Number(/^(\d+)/.exec(m.content)?.[1]));
+  return { numbers, trace: service.getTrace(root.id) };
+}
+
 describe("Countdown demo", () => {
-  it("N agents count down 10..1 exactly once each, in order, with visible conflicts", async () => {
-    const N = 3;
+  it("with @everyone on every message (default), N agents count down 10..1 once each, in order", async () => {
+    const N = 5;
     let service!: AgentService;
-    // A model's memory: what it has seen others post, and what it believes it posted itself.
-    const seenByOthers = new Map<string, Set<number>>();
-    const believedMine = new Map<string, Set<number>>();
-    let firstPrompts = 0;
-    const runner: AgentRunner = {
-      run: async (request) => {
-        const me = service.getAgent(request.agentId);
-        const seen = seenByOthers.get(me.id) ?? new Set<number>();
-        const mine = believedMine.get(me.id) ?? new Set<number>();
-        seenByOthers.set(me.id, seen);
-        believedMine.set(me.id, mine);
-        // Read the prompt the way a model would: what others posted, what beat me, what of mine was rejected.
-        for (const match of request.prompt.matchAll(/\] Agent\w+: (\d+)\s*$/gm)) seen.add(Number(match[1]));
-        for (const match of request.prompt.matchAll(/Agent\w+ posted "(\d+)"/g)) seen.add(Number(match[1]));
-        const rejected = /Your rejected reply was: "(\d+)"/.exec(request.prompt);
-        if (rejected) mine.delete(Number(rejected[1]));
-        if (!request.prompt.includes("was NOT posted") && request.prompt.includes("count down")) {
-          // Everyone answers the human at the same moment: a guaranteed race on "10".
-          firstPrompts += 1;
-          await expect.poll(() => firstPrompts >= N, { timeout: 5_000 }).toBe(true);
-        }
-        await sleep(Math.floor(Math.random() * 20));
-        const known = [...seen, ...mine];
-        const next = (known.length > 0 ? Math.min(...known) : 11) - 1;
-        if (next < 1) return { output: "[no reply]", threadId: null, usage: null };
-        mine.add(next); // believed posted until told otherwise
-        return { output: String(next), threadId: null, usage: null };
-      },
-      cancel: async () => false,
-      isAvailable: async () => true,
-    };
-    ({ service } = await makeService(runner));
-    for (let index = 0; index < N; index += 1) await service.createAgent({ name: "Agent" + "ABC"[index] });
-    const general = service.getChannelByName("general");
-    const root = await service.postUserMessage(
-      general.id,
-      "@everyone count down from 10 to 1, one number per message, take turns",
-    );
-    await expect
-      .poll(() => {
-        const trace = service.getTrace(root.id);
-        const last = service.getMessages(general.id).filter((m) => m.kind === "message").at(-1);
-        return !trace.live && last?.content === "1" && service.listAgents().every((agent) => agent.status === "ready");
-      }, { timeout: 20_000, interval: 50 })
-      .toBe(true);
-    await sleep(100);
-    const numbers = service
-      .getMessages(general.id)
-      .filter((m) => m.kind === "message" && m.authorKind !== "user")
-      .map((m) => m.content);
-    expect(numbers).toEqual(["10", "9", "8", "7", "6", "5", "4", "3", "2", "1"]);
-    const trace = service.getTrace(root.id);
+    ({ service } = await makeService(countdownRunner(() => service, N, " @everyone")));
+    const { numbers, trace } = await runCountdown(service, N);
+    expect(numbers).toEqual([10, 9, 8, 7, 6, 5, 4, 3, 2, 1]);
+    // Every step is a race between all N: conflicts on most steps, all resolved by regenerating.
     expect(trace.messages.filter((m) => m.kind === "conflict").length).toBeGreaterThanOrEqual(N - 1);
     expect(trace.runs.some((run) => run.trigger === "conflict")).toBe(true);
+    expect(trace.runs.length).toBeLessThanOrEqual(64);
+    expect(trace.messages.some((m) => m.content.startsWith("Paused"))).toBe(false);
+    const notice = trace.messages.find((m) => m.kind === "conflict");
+    expect(notice?.content).toMatch(/Agent[A-E]'s reply "10 @everyone" was not posted, but Agent[A-E] got there first with "10 @everyone"/);
+  });
+
+  it("with TURN_TAKING=on, N agents count down 10..1 with one run per step after the opening race", async () => {
+    const N = 3;
+    let service!: AgentService;
+    ({ service } = await makeService(countdownRunner(() => service, N, ""), createInMemorySync(), { TURN_TAKING: "on" }));
+    const { numbers, trace } = await runCountdown(service, N);
+    expect(numbers).toEqual([10, 9, 8, 7, 6, 5, 4, 3, 2, 1]);
+    expect(trace.messages.filter((m) => m.kind === "conflict").length).toBeGreaterThanOrEqual(N - 1);
     expect(trace.runs.length).toBeLessThanOrEqual(24);
     expect(trace.messages.some((m) => m.content.startsWith("Paused"))).toBe(false);
-    // The judge-facing story is in the channel: who tried what, who got there first.
-    const notice = trace.messages.find((m) => m.kind === "conflict");
-    expect(notice?.content).toMatch(/Agent[ABC]'s reply "10" was not posted, but Agent[ABC] got there first with "10"/);
   });
 });
 

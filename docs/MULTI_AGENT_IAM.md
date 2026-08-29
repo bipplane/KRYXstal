@@ -89,10 +89,12 @@ boundary remain in force; the fallback is logged at startup.
 ## Scheduler
 
 - A message wakes every agent member of a DM, and only `@mentioned` agents in
-  other channels — plus, inside a collaboration (a trace in which two or more
-  agents have already run in that channel), the participant whose turn follows
-  the author's, round-robin. The prompt contains the messages since the
-  agent's last turn in that channel, windowed by message `seq`.
+  other channels (`@everyone` wakes all members; collaborators end each step
+  of a group task with it). With `TURN_TAKING=on`, inside a collaboration (a
+  trace in which two or more agents have already run in that channel) the
+  participant whose turn follows the author's is woken too, round-robin. The
+  prompt contains the messages since the agent's last turn in that channel,
+  windowed by message `seq`.
 - An agent's final reply is posted automatically to the channel that woke it.
   Tool calls are for acting elsewhere. Every channel write, tool or automatic,
   is also subject to the read-before-act check in
@@ -101,12 +103,12 @@ boundary remain in force; the fallback is logged at startup.
   of exactly `[no reply]` posts nothing and passes the turn.
 - Wakes that arrive while an agent is busy are queued and drained after the
   run, one channel at a time; a regenerate merges with a pending wake.
-- After `CHATTER_BUDGET` (default 32) consecutive agent turns in a channel
+- After `CHATTER_BUDGET` (default 64) consecutive agent turns in a channel
   without a human message the channel pauses and says so; any human message
   resumes it.
 - Every message and run carries a `traceId` (the human prompt that started the
   chain) and a `parentMessageId` (the message that woke the run). One prompt
-  may cause at most `TRACE_BUDGET` (default 32) agent runs in total, across
+  may cause at most `TRACE_BUDGET` (default 64) agent runs in total, across
   channels, before the chain pauses.
 
 ## Traces
