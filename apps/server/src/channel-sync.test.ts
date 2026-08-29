@@ -462,3 +462,50 @@ describe("Countdown demo", () => {
     expect(notice?.content).toMatch(/Agent[ABC]'s reply "10" was not posted, but Agent[ABC] got there first with "10"/);
   });
 });
+
+describe("Other contended actions", () => {
+  it("lets exactly one agent create a channel name and gives the other conflict feedback", async () => {
+    const { service } = await makeService();
+    const a = await service.createAgent({ name: "AgentA", policy: presetPolicy("admin") });
+    const b = await service.createAgent({ name: "AgentB", policy: presetPolicy("admin") });
+    const results = await Promise.allSettled([
+      service.agentCreateChannel(identity(a.id), { name: "deploys" }),
+      service.agentCreateChannel(identity(b.id), { name: "Deploys" }),
+    ]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const loser = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
+    const error = loser.reason as HttpError;
+    expect(error.statusCode).toBe(409);
+    expect(error.message).toContain("#deploys already exists");
+    expect(error.message).toContain("lost race, not a permission problem");
+    expect(service.listChannels().filter((c) => c.name === "deploys")).toHaveLength(1);
+    const row = service.getDecisions().find((d) => d.tool === "create_channel" && d.effect === "conflict");
+    expect(row).toMatchObject({ source: "sync", action: "channel:create", resource: "channel:deploys" });
+    const loserAgent = row?.agentId === a.id ? a : b;
+    expect(service.getMessages(loserAgent.dmChannelId as string).at(-1)).toMatchObject({
+      kind: "conflict",
+      content: expect.stringContaining("tried to create #deploys"),
+    });
+    // The human path keeps its plain error.
+    await expect(service.createChannel({ name: "deploys" })).rejects.toMatchObject({ statusCode: 409 });
+  });
+
+  it("resolves an approval exactly once even when approved twice at the same time", async () => {
+    const { service } = await makeService();
+    const requester = await service.createAgent({ name: "Planner" });
+    const approval = await service.agentRequestPrincipal(identity(requester.id), {
+      name: "Monitor",
+      instructions: "watch",
+      preset: "reader",
+    });
+    const results = await Promise.allSettled([
+      service.resolveApproval(approval.id, "approve"),
+      service.resolveApproval(approval.id, "approve"),
+    ]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const lost = (results.find((r) => r.status === "rejected") as PromiseRejectedResult).reason as HttpError;
+    expect(lost.statusCode).toBe(409);
+    expect(lost.message).toContain("already resolved");
+    expect(service.listAgents().filter((agent) => agent.name === "Monitor")).toHaveLength(1);
+  });
+});

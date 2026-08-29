@@ -523,34 +523,143 @@ export class AgentService {
 
   // ---------------------------------------------------------------- channels
 
-  async createChannel(input: {
-    name: string;
-    description?: string | undefined;
-    memberIds?: string[] | undefined;
-  }): Promise<Channel> {
+  /**
+   * Creates a channel. The channel registry is a contended resource: two
+   * agents (or an agent and the human) may try the same name at once, so the
+   * uniqueness check and the insert run as one synced action. When an agent
+   * loses, it gets conflict feedback rather than a bare error.
+   */
+  async createChannel(
+    input: {
+      name: string;
+      description?: string | undefined;
+      memberIds?: string[] | undefined;
+    },
+    actor: { agent: Agent; runId: string | null } | null = null,
+  ): Promise<Channel> {
     const name = input.name.replace(/^#/, "").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-");
     if (!name) throw new HttpError(400, "Channel name is required");
-    return this.store.mutate((database) => {
-      if (database.channels.some((channel) => channel.name === name && !channel.archivedAt)) {
-        throw new HttpError(409, "Channel #" + name + " already exists");
-      }
-      const members = [USER_ID, ...(input.memberIds ?? [])].filter(
-        (memberId) =>
-          memberId === USER_ID || database.agents.some((agent) => agent.id === memberId),
-      );
-      const channel = this.newChannel(database, {
-        name,
-        description: input.description?.trim() ?? "",
-        kind: "public",
-        memberIds: members,
-      });
-      for (const agent of database.agents) {
-        if (members.includes(agent.id)) {
-          agent.policy = grantChannels(agent.policy, [name]);
+    const resource = "channel:" + name;
+    const outcome = await this.performSynced<Channel>({
+      resource: "channels",
+      holder: actor ? (actor.runId ? "run:" + actor.runId : "agent:" + actor.agent.id) : USER_ID,
+      validate: (database) => {
+        const existing = database.channels.find(
+          (channel) => channel.name === name && !channel.archivedAt,
+        );
+        if (!existing) return null;
+        return this.registryConflict(
+          resource,
+          "create #" + name,
+          "#" + name + " already exists (created " + existing.createdAt.slice(11, 19) + ")",
+          "Use the existing channel (list_channels, read_channel) or choose another name.",
+          actor?.runId ?? null,
+        );
+      },
+      commit: (database) => {
+        const members = [USER_ID, ...(input.memberIds ?? [])].filter(
+          (memberId) =>
+            memberId === USER_ID || database.agents.some((agent) => agent.id === memberId),
+        );
+        const channel = this.newChannel(database, {
+          name,
+          description: input.description?.trim() ?? "",
+          kind: "public",
+          memberIds: members,
+        });
+        for (const agent of database.agents) {
+          if (members.includes(agent.id)) {
+            agent.policy = grantChannels(agent.policy, [name]);
+          }
         }
-      }
-      return structuredClone(channel);
+        return structuredClone(channel);
+      },
+      onConflict: (database, conflict) => {
+        if (actor) this.countConflict(database, actor.runId);
+        void conflict;
+      },
+      busy: (holder) =>
+        this.registryConflict(
+          resource,
+          "create #" + name,
+          "the channel registry is busy" + (holder ? " (" + holder + ")" : ""),
+          "Try again in a moment.",
+          actor?.runId ?? null,
+        ),
     });
+    if (outcome.ok) return outcome.value;
+    if (actor) {
+      await this.recordDecision({
+        agentId: actor.agent.id,
+        agentName: actor.agent.name,
+        runId: actor.runId,
+        source: "sync",
+        tool: "create_channel",
+        action: "channel:create",
+        resource,
+        effect: "conflict",
+        reason: outcome.conflict.winnerContent ?? "conflict",
+      });
+      await this.announceConflict(
+        actor.agent,
+        actor.runId,
+        actor.agent.name + " tried to create #" + name + ", but " + (outcome.conflict.winnerContent ?? "it already exists") + ".",
+      );
+      throw new HttpError(409, outcome.conflict.feedback, { conflict: outcome.conflict });
+    }
+    throw new HttpError(409, "Channel #" + name + " already exists");
+  }
+
+  /** A conflict on a non-channel resource (a registry, an approval): compare-and-set failed. */
+  private registryConflict(
+    resource: string,
+    rejected: string,
+    what: string,
+    next: string,
+    runId: string | null,
+  ): Conflict {
+    const attempt = this.conflictsSoFar(this.store.peek(), runId) + 1;
+    return {
+      resource,
+      cause: "stale",
+      winnerId: null,
+      winnerName: null,
+      winnerContent: what,
+      winnerMessageId: null,
+      winnerSeq: null,
+      rejectedContent: rejected,
+      unseen: [],
+      seenSeq: 0,
+      headSeq: 0,
+      attempt,
+      limit: MAX_CONFLICTS_PER_TURN,
+      feedback:
+        "Your action (" +
+        rejected +
+        ") was not accepted: " +
+        what +
+        ". Someone acted first; this is a lost race, not a permission problem. " +
+        next,
+    };
+  }
+
+  /** Posts a conflict notice where the agent's run is visible (its run channel, else its DM). */
+  private async announceConflict(agent: Agent, runId: string | null, content: string): Promise<void> {
+    const run = runId ? this.store.peek().runs.find((item) => item.id === runId) : null;
+    const channelId = run?.channelId ?? agent.dmChannelId;
+    if (!channelId) return;
+    await this.store.mutate((database) =>
+      this.appendMessage(database, channelId, {
+        authorId: agent.id,
+        authorName: agent.name,
+        authorKind: agent.kind,
+        kind: "conflict",
+        content,
+        runId,
+        approvalId: null,
+        ...this.traceOfRun(runId),
+      }),
+    );
   }
 
   /**
@@ -997,8 +1106,11 @@ export class AgentService {
       const channel = this.store
         .peek()
         .channels.find((item) => item.name.toLowerCase() === name.toLowerCase() && !item.archivedAt);
-      if (!channel) return { effect: "deny", reason: "Channel #" + name + " does not exist" };
-      if (action !== "channel:create" && !channel.memberIds.includes(agent.id)) {
+      // Creating a channel is the one action whose target does not exist yet.
+      if (!channel && action !== "channel:create") {
+        return { effect: "deny", reason: "Channel #" + name + " does not exist" };
+      }
+      if (channel && action !== "channel:create" && !channel.memberIds.includes(agent.id)) {
         return { effect: "deny", reason: agent.name + " is not a member of #" + name };
       }
     }
@@ -1140,11 +1252,14 @@ export class AgentService {
     const memberIds = (input.members ?? [])
       .map((memberName) => this.findAgentByName(memberName)?.id)
       .filter((id): id is string => Boolean(id));
-    const channel = await this.createChannel({
-      name,
-      description: input.description,
-      memberIds: [agent.id, ...memberIds],
-    });
+    const channel = await this.createChannel(
+      {
+        name,
+        description: input.description,
+        memberIds: [agent.id, ...memberIds],
+      },
+      { agent, runId: identity.runId },
+    );
     await this.workspaces.writeInstructions(this.getAgent(agent.id), this.instructionContext(this.getAgent(agent.id)));
     return channel;
   }
@@ -1330,10 +1445,45 @@ export class AgentService {
     });
   }
 
+  /**
+   * The human resolves an approval. Claiming it is a synced compare-and-set on
+   * the approval itself, so two clicks (or two tabs) cannot both create the
+   * principal: the second one loses the race and gets a 409.
+   */
   async resolveApproval(id: string, decision: "approve" | "deny"): Promise<ApprovalRequest> {
-    const approval = this.store.peek().approvals.find((item) => item.id === id);
-    if (!approval) throw new HttpError(404, "Approval not found");
-    if (approval.status !== "pending") throw new HttpError(409, "Approval already resolved");
+    if (!this.store.peek().approvals.some((item) => item.id === id)) {
+      throw new HttpError(404, "Approval not found");
+    }
+    const claim = await this.performSynced<ApprovalRequest>({
+      resource: "approval:" + id,
+      holder: USER_ID,
+      validate: (database) => {
+        const stored = database.approvals.find((item) => item.id === id);
+        if (!stored || stored.status === "pending") return null;
+        return this.registryConflict(
+          "approval:" + id,
+          decision,
+          "the request was already " + stored.status,
+          "Nothing to do.",
+          null,
+        );
+      },
+      commit: (database) => {
+        const stored = database.approvals.find((item) => item.id === id);
+        if (!stored) throw new HttpError(404, "Approval not found");
+        stored.status = decision === "approve" ? "approved" : "denied";
+        stored.resolvedAt = now();
+        return structuredClone(stored);
+      },
+      busy: (holder) =>
+        this.registryConflict("approval:" + id, decision, "the approval is busy" + (holder ? " (" + holder + ")" : ""), "Try again.", null),
+    });
+    if (!claim.ok) {
+      throw new HttpError(409, "Approval already resolved: " + (claim.conflict.winnerContent ?? ""), {
+        conflict: claim.conflict,
+      });
+    }
+    const approval = claim.value;
     let created: Agent | null = null;
     if (decision === "approve") {
       created = await this.createAgent({
@@ -1351,8 +1501,6 @@ export class AgentService {
     const resolved = await this.store.mutate((database) => {
       const stored = database.approvals.find((item) => item.id === id);
       if (!stored) throw new HttpError(404, "Approval not found");
-      stored.status = decision === "approve" ? "approved" : "denied";
-      stored.resolvedAt = now();
       const approvals = database.channels.find((channel) => channel.name === APPROVALS_CHANNEL);
       const text =
         decision === "approve"
