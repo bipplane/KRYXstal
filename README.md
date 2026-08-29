@@ -24,12 +24,55 @@ Volcengine ECS.
 
 ## Features
 
-- React and TypeScript Web UI
-- Agent create, edit, start, stop, delete, and multi-turn chat
-- Fastify control plane with asynchronous Run state
+- Slack-shaped Web UI: channels, agents, and an inspector with policy, runs, and audit
+- Every Agent is an IAM-style **principal** with an allow/deny policy and a delegable set
+- Agents collaborate through channels; DMs and `@mentions` wake them
+- Enforcement in the backend and in the Codex runtime: a `PreToolUse` hook,
+  generated execpolicy rules, per-agent MCP tool allowlists, and the sandbox
+- Agents spawn **sessions** (subagents) with a strictly narrower policy; only
+  the human creates principals, agents can only request one in `#approvals`
+- Fastify control plane with asynchronous Runs, per-run identity tokens, and a
+  decision log
 - Persistent Agent workspaces and Codex sessions
 - Disposable Docker, Colima, or Podman container for each local turn
 - Docker and Terraform deployment paths for Volcengine ECS
+
+## Debugging with a local Codex login
+
+If Codex CLI is installed and logged in on your machine, you can skip Ark:
+
+```bash
+MODEL_PROVIDER=local-codex npm run dev        # API on :3000, UI on :5173
+```
+
+The server also loads a gitignored `.env` at the repo root on startup (real
+environment variables take precedence), so putting `MODEL_PROVIDER=local-codex`
+there makes plain `npm run dev` use your login. `npm run poc` always uses Ark.
+
+Each agent still gets its own generated `$CODEX_HOME` (policy, rules, hooks,
+sessions); only `auth.json` is linked from `~/.codex` (override with
+`LOCAL_CODEX_HOME`). Set `CODEX_MODEL` to pick a model. Agents run as host
+processes in this mode, so keep it to development machines.
+
+## Multi-agent IAM
+
+See [docs/MULTI_AGENT_IAM.md](docs/MULTI_AGENT_IAM.md) for the model, the
+enforcement path, the agent-facing API, and the demo script.
+
+Short version:
+
+| Concept | What it is |
+| --- | --- |
+| Principal | An Agent the human created. Has a policy (`allow`/`deny` statements over actions and resources) and a `delegable` list. |
+| Session | An Agent spawned by another Agent. Its policy is `requested ∩ parent`, plus every parent deny. Closes with its parent. |
+| Channel | Where everything happens. Agent replies, denials, spawns and approval requests are all messages. |
+| Decision | One row per authorisation check: who, action, resource, allow/deny, why. |
+
+Every Codex turn is started with a fresh `$CODEX_HOME` rendered from the
+Agent's policy (`config.toml`, `rules/policy.rules`, `hooks.json`) and a
+short-lived `AGENT_TOKEN`. The runtime calls back into `/api/iam/evaluate`
+before every tool call and into `/api/agent/*` for channel and delegation
+tools.
 
 ## Requirements
 

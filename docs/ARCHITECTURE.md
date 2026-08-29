@@ -13,6 +13,9 @@ flowchart LR
     Runner -->|ECS| Process["Codex child process"]
     Container --> Ark["Volcengine Ark"]
     Process --> Ark
+    Container -. "PreToolUse hook + MCP tools\n(AGENT_TOKEN)" .-> IAM["/api/iam, /api/agent"]
+    Process -. "PreToolUse hook + MCP tools" .-> IAM
+    IAM --> Service
 ```
 
 ## Components
@@ -29,8 +32,12 @@ serves the compiled Web UI. The token is not user identity or authorization.
 
 ### AgentService
 
-Coordinates lifecycle state, persistence, workspaces, and Runs. One Agent can
-have only one active Run.
+Coordinates lifecycle state, persistence, workspaces, channels, IAM decisions,
+sessions, approvals, and Runs. One Agent can have only one active Run; wakes
+that arrive while it is busy are queued and drained afterwards.
+
+The IAM model (principals, sessions, policies, enforcement layers) is
+described in [MULTI_AGENT_IAM.md](MULTI_AGENT_IAM.md).
 
 ```text
 ready -> busy -> ready
@@ -44,10 +51,12 @@ Interrupted Runs become `cancelled` after a restart.
 ### Storage
 
 ```text
-data/launchpad.json       Agent, message, and Run metadata
-workspaces/AgentID/       Agent-created files
+data/launchpad.json       Agents, channels, messages, Runs, decisions, approvals
+workspaces/AgentID/       Agent-created files (+ generated AGENTS.md)
 workspaces/.deleted/      Archived deleted workspaces
-codex-home/               Codex configuration and sessions
+codex-home/agents/ID/     Per-agent Codex home: generated config.toml,
+                          rules/policy.rules, hooks.json, and Codex sessions
+runtime/                  MCP channel server and IAM hook run inside the Runtime
 ```
 
 `JsonStore` serializes writes and atomically replaces one JSON file. It supports
@@ -60,7 +69,10 @@ one process only.
   container for every local turn.
 
 Both providers use argv-only process execution, bound output and time, resume
-the stored Codex thread, and escalate termination after a grace period.
+the stored Codex thread, and escalate termination after a grace period. Both
+receive the per-run `AGENT_TOKEN` and `LAUNCHPAD_URL` in the environment (never
+in argv) and stream Codex `command_execution`, `mcp_tool_call`, and
+`file_change` items back as Run events.
 
 ## Deployment profiles
 

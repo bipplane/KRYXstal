@@ -1,14 +1,9 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
-import type { AppConfig } from "./config.js";
-import { buildCodexArgs, parseCodexEventLine } from "./codex-runner.js";
+import { CONTAINER_SCRIPTS_DIR, type AppConfig } from "./config.js";
+import { buildCodexArgs, newParsedEvents, parseCodexEventLine } from "./codex-runner.js";
 import { RunCancelledError } from "./errors.js";
-import type {
-  AgentRunner,
-  RunUsage,
-  RunnerRequest,
-  RunnerResult,
-} from "./types.js";
+import type { AgentRunner, RunnerRequest, RunnerResult } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -20,13 +15,6 @@ interface ActiveContainer {
   outputExceeded: boolean;
   settled: Promise<void>;
   termination: Promise<void> | null;
-}
-
-interface ParsedEvents {
-  messages: string[];
-  threadId: string | null;
-  usage: RunUsage | null;
-  errors: string[];
 }
 
 export function containerName(agentId: string, instanceId = "default"): string {
@@ -41,6 +29,7 @@ export function buildContainerRunArgs(
 ): string[] {
   const name = containerName(request.agentId, config.runtimeInstanceId);
   const engineName = config.containerEngine.split(/[\\/]/).at(-1)?.toLowerCase();
+  const passthroughEnv = Object.keys(request.env).flatMap((key) => ["--env", key]);
   return [
     "run",
     "--rm",
@@ -54,6 +43,7 @@ export function buildContainerRunArgs(
     "--label",
     "io.codejam.instance-id=" + config.runtimeInstanceId,
     ...(engineName === "podman" ? ["--userns", "keep-id"] : []),
+    ...(engineName === "podman" ? [] : ["--add-host", "host.docker.internal:host-gateway"]),
     "--network",
     "bridge",
     "--security-opt",
@@ -76,15 +66,18 @@ export function buildContainerRunArgs(
     "HOME=/tmp",
     "--env",
     "NO_COLOR=1",
+    ...passthroughEnv,
     "--mount",
     "type=bind,src=" + request.workspacePath + ",dst=/workspace",
     "--mount",
-    "type=bind,src=" + config.codexHome + ",dst=/codex-home",
+    "type=bind,src=" + request.codexHome + ",dst=/codex-home",
+    "--mount",
+    "type=bind,src=" + config.runtimeScriptsDir + ",dst=" + CONTAINER_SCRIPTS_DIR + ",readonly",
     "--workdir",
     "/workspace",
     config.containerRuntimeImage,
     "codex",
-    ...buildCodexArgs(request, config.codexSandboxMode, "/workspace"),
+    ...buildCodexArgs(request, "/workspace"),
   ];
 }
 
@@ -97,12 +90,12 @@ export class ContainerCodexRunner implements AgentRunner {
     try {
       await execFileAsync(this.config.containerEngine, ["version"], {
         timeout: 5_000,
-        env: this.childEnvironment(),
+        env: this.childEnvironment({}),
       });
       await execFileAsync(
         this.config.containerEngine,
         ["image", "inspect", this.config.containerRuntimeImage],
-        { timeout: 5_000, env: this.childEnvironment() },
+        { timeout: 5_000, env: this.childEnvironment({}) },
       );
       return true;
     } catch {
@@ -125,7 +118,7 @@ export class ContainerCodexRunner implements AgentRunner {
       active.termination = execFileAsync(
         this.config.containerEngine,
         ["rm", "--force", active.containerName],
-        { timeout: 8_000, env: this.childEnvironment() },
+        { timeout: 8_000, env: this.childEnvironment({}) },
       )
         .then(() => undefined)
         .catch(() => {
@@ -147,7 +140,7 @@ export class ContainerCodexRunner implements AgentRunner {
       buildContainerRunArgs(request, this.config),
       {
         cwd: request.workspacePath,
-        env: this.childEnvironment(),
+        env: this.childEnvironment(request.env),
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
@@ -166,12 +159,7 @@ export class ContainerCodexRunner implements AgentRunner {
     };
     this.active.set(request.agentId, active);
 
-    const parsed: ParsedEvents = {
-      messages: [],
-      threadId: request.threadId,
-      usage: null,
-      errors: [],
-    };
+    const parsed = newParsedEvents(request.threadId, request.onEvent);
     let stdout = "";
     let stderr = "";
     let totalBytes = 0;
@@ -235,10 +223,11 @@ export class ContainerCodexRunner implements AgentRunner {
     }
   }
 
-  private childEnvironment(): NodeJS.ProcessEnv {
+  private childEnvironment(extra: Record<string, string>): NodeJS.ProcessEnv {
     const environment: NodeJS.ProcessEnv = {
       ARK_API_KEY: this.config.arkApiKey,
       NO_COLOR: "1",
+      ...extra,
     };
     for (const name of [
       "PATH",
@@ -247,6 +236,8 @@ export class ContainerCodexRunner implements AgentRunner {
       "LANG",
       "LC_ALL",
       "XDG_RUNTIME_DIR",
+      "DOCKER_HOST",
+      "CONTAINER_HOST",
     ] as const) {
       if (process.env[name] !== undefined) environment[name] = process.env[name];
     }

@@ -1,10 +1,12 @@
 import { execFile } from "node:child_process";
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import type { AppConfig } from "./config.js";
 import { RunCancelledError } from "./errors.js";
 import type {
   AgentRunner,
+  RunEvent,
   RunUsage,
   RunnerRequest,
   RunnerResult,
@@ -17,19 +19,30 @@ export interface ParsedEvents {
   threadId: string | null;
   usage: RunUsage | null;
   errors: string[];
+  events: RunEvent[];
+  onEvent?: ((event: RunEvent) => void) | undefined;
+}
+
+export function newParsedEvents(
+  threadId: string | null,
+  onEvent?: ((event: RunEvent) => void) | undefined,
+): ParsedEvents {
+  return { messages: [], threadId, usage: null, errors: [], events: [], onEvent };
 }
 
 export function buildCodexArgs(
-  request: RunnerRequest,
-  sandboxMode: AppConfig["codexSandboxMode"],
-  workspacePath = request.workspacePath,
+  request: Pick<RunnerRequest, "prompt" | "threadId" | "sandboxMode">,
+  workspacePath: string,
 ): string[] {
   const args = [
     "exec",
     "--json",
+    "--color",
+    "never",
     "--sandbox",
-    sandboxMode,
+    request.sandboxMode,
     "--skip-git-repo-check",
+    "--dangerously-bypass-hook-trust",
     "-C",
     workspacePath,
   ];
@@ -39,6 +52,65 @@ export function buildCodexArgs(
     args.push(request.prompt);
   }
   return args;
+}
+
+const MAX_DETAIL = 4_000;
+
+function clip(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  return text.length > MAX_DETAIL ? text.slice(0, MAX_DETAIL) + "…" : text;
+}
+
+export function itemToRunEvent(item: Record<string, unknown>): RunEvent | null {
+  const base = {
+    id: typeof item.id === "string" ? item.id : randomUUID(),
+    status: typeof item.status === "string" ? item.status : null,
+    exitCode: typeof item.exit_code === "number" ? item.exit_code : null,
+    createdAt: new Date().toISOString(),
+  };
+  switch (item.type) {
+    case "command_execution": {
+      const command = Array.isArray(item.command)
+        ? item.command.map(String).join(" ")
+        : String(item.command ?? "");
+      return {
+        ...base,
+        type: "command_execution",
+        summary: command,
+        detail: clip(item.aggregated_output),
+      };
+    }
+    case "mcp_tool_call": {
+      return {
+        ...base,
+        type: "mcp_tool_call",
+        summary: String(item.server ?? "mcp") + "." + String(item.tool ?? "?"),
+        detail: clip({ arguments: item.arguments, result: item.result, error: item.error }),
+      };
+    }
+    case "file_change": {
+      const changes = Array.isArray(item.changes) ? item.changes : [];
+      return {
+        ...base,
+        type: "file_change",
+        summary:
+          changes
+            .map((change) => {
+              const record = change as Record<string, unknown>;
+              return String(record.kind ?? "edit") + " " + String(record.path ?? "");
+            })
+            .join(", ") || "file change",
+        detail: null,
+      };
+    }
+    case "web_search":
+      return { ...base, type: "web_search", summary: String(item.query ?? "web search"), detail: null };
+    case "reasoning":
+      return { ...base, type: "reasoning", summary: clip(item.text) ?? "", detail: null };
+    default:
+      return null;
+  }
 }
 
 export function parseCodexEventLine(line: string, parsed: ParsedEvents): void {
@@ -57,6 +129,12 @@ export function parseCodexEventLine(line: string, parsed: ParsedEvents): void {
     const item = event.item as Record<string, unknown>;
     if (item.type === "agent_message" && typeof item.text === "string") {
       parsed.messages.push(item.text);
+    } else {
+      const runEvent = itemToRunEvent(item);
+      if (runEvent) {
+        parsed.events.push(runEvent);
+        parsed.onEvent?.(runEvent);
+      }
     }
   }
 
@@ -75,6 +153,11 @@ export function parseCodexEventLine(line: string, parsed: ParsedEvents): void {
     };
   }
 
+  if (event.type === "turn.failed" && event.error && typeof event.error === "object") {
+    const detail = (event.error as Record<string, unknown>).message;
+    if (typeof detail === "string") parsed.errors.push(detail);
+  }
+
   if (event.type === "error") {
     const message =
       typeof event.message === "string"
@@ -85,6 +168,23 @@ export function parseCodexEventLine(line: string, parsed: ParsedEvents): void {
     parsed.errors.push(message);
   }
 }
+
+/** Environment variables safe to inherit from the control plane into a Codex process. */
+export const INHERITED_ENV = [
+  "PATH",
+  "HOME",
+  "TMPDIR",
+  "LANG",
+  "LC_ALL",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "NO_PROXY",
+  "NODE_EXTRA_CA_CERTS",
+  "TERM",
+  "XDG_RUNTIME_DIR",
+] as const;
 
 export class CodexRunner implements AgentRunner {
   private readonly active = new Map<
@@ -105,7 +205,7 @@ export class CodexRunner implements AgentRunner {
     try {
       await execFileAsync(this.config.codexBin, ["--version"], {
         timeout: 5_000,
-        env: this.childEnvironment(),
+        env: this.childEnvironment(this.config.codexHome, {}),
       });
       return true;
     } catch {
@@ -129,10 +229,10 @@ export class CodexRunner implements AgentRunner {
       throw new Error("Agent already has an active Codex process");
     }
 
-    const args = buildCodexArgs(request, this.config.codexSandboxMode);
+    const args = buildCodexArgs(request, request.workspacePath);
     const child = spawn(this.config.codexBin, args, {
       cwd: request.workspacePath,
-      env: this.childEnvironment(),
+      env: this.childEnvironment(request.codexHome, request.env),
       stdio: ["ignore", "pipe", "pipe"],
     });
     const settled = new Promise<void>((resolve) => {
@@ -149,12 +249,7 @@ export class CodexRunner implements AgentRunner {
     };
     this.active.set(request.agentId, active);
 
-    const parsed: ParsedEvents = {
-      messages: [],
-      threadId: request.threadId,
-      usage: null,
-      errors: [],
-    };
+    const parsed = newParsedEvents(request.threadId, request.onEvent);
     let stdout = "";
     let stderr = "";
     let totalBytes = 0;
@@ -239,27 +334,17 @@ export class CodexRunner implements AgentRunner {
     }
   }
 
-  private childEnvironment(): NodeJS.ProcessEnv {
-    const inheritedNames = [
-      "PATH",
-      "HOME",
-      "TMPDIR",
-      "LANG",
-      "LC_ALL",
-      "SSL_CERT_FILE",
-      "SSL_CERT_DIR",
-      "HTTP_PROXY",
-      "HTTPS_PROXY",
-      "NO_PROXY",
-      "NODE_EXTRA_CA_CERTS",
-      "TERM",
-    ] as const;
+  private childEnvironment(
+    codexHome: string,
+    extra: Record<string, string>,
+  ): NodeJS.ProcessEnv {
     const environment: NodeJS.ProcessEnv = {
-      CODEX_HOME: this.config.codexHome,
+      CODEX_HOME: codexHome,
       ARK_API_KEY: this.config.arkApiKey,
       NO_COLOR: "1",
+      ...extra,
     };
-    for (const name of inheritedNames) {
+    for (const name of INHERITED_ENV) {
       if (process.env[name] !== undefined) environment[name] = process.env[name];
     }
     return environment;

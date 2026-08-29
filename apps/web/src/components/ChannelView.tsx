@@ -1,0 +1,482 @@
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { api, ApiError } from "../api";
+import type { Agent, ApprovalRequest, Channel, ChannelMessage, Overview } from "../types";
+import { Avatar, clockTime, EmptyState, ErrorNote, fullTime, Spinner, Tag, useNow } from "./ui";
+
+interface ChannelViewProps {
+  channel: Channel | null;
+  overview: Overview | null;
+  onSelectAgent: (agentId: string) => void;
+  onOpenRun: (agentId: string, runId: string) => void;
+  onResolveApproval: (approvalId: string, decision: "approve" | "deny") => Promise<void>;
+}
+
+const POLL_MS = 1500;
+
+export default function ChannelView({
+  channel,
+  overview,
+  onSelectAgent,
+  onOpenRun,
+  onResolveApproval,
+}: ChannelViewProps) {
+  const channelId = channel?.id ?? null;
+  const [messages, setMessages] = useState<ChannelMessage[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const stickToBottom = useRef(true);
+  const lastMessageId = useRef<string | null>(null);
+  const now = useNow(30000);
+
+  // Reset when the channel changes.
+  useEffect(() => {
+    setMessages([]);
+    setError(null);
+    setSendError(null);
+    setLoading(Boolean(channelId));
+    stickToBottom.current = true;
+    lastMessageId.current = null;
+  }, [channelId]);
+
+  // Poll messages for the open channel.
+  useEffect(() => {
+    if (!channelId) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const { messages: next } = await api.messages(channelId, 200);
+        if (cancelled) return;
+        setMessages(next);
+        setError(null);
+      } catch (err) {
+        if (cancelled) return;
+        if (err instanceof ApiError && err.status === 401) return;
+        setError(err instanceof Error ? err.message : "Failed to load messages");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    void tick();
+    const timer = window.setInterval(() => void tick(), POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [channelId]);
+
+  // Auto-scroll when new messages arrive, unless the user scrolled up.
+  useEffect(() => {
+    const last = messages.length > 0 ? messages[messages.length - 1].id : null;
+    if (last === lastMessageId.current) return;
+    lastMessageId.current = last;
+    const el = listRef.current;
+    if (el && stickToBottom.current) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [messages]);
+
+  const onScroll = useCallback(() => {
+    const el = listRef.current;
+    if (!el) return;
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    stickToBottom.current = distance < 48;
+  }, []);
+
+  const send = async () => {
+    const content = draft.trim();
+    if (!content || !channelId || sending) return;
+    setSending(true);
+    setSendError(null);
+    try {
+      const { message } = await api.sendMessage(channelId, content);
+      setDraft("");
+      stickToBottom.current = true;
+      setMessages((prev) => (prev.some((m) => m.id === message.id) ? prev : [...prev, message]));
+    } catch (err) {
+      setSendError(err instanceof Error ? err.message : "Failed to send");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      void send();
+    }
+  };
+
+  const agents = overview?.agents ?? [];
+  const members = channel
+    ? channel.memberIds.map((id) => {
+        if (id === "user") return { id, name: overview?.user.name ?? "You", kind: "user" as const };
+        const agent = agents.find((a) => a.id === id);
+        return agent
+          ? { id, name: agent.name, kind: agent.kind }
+          : { id, name: id, kind: "principal" as const };
+      })
+    : [];
+
+  if (!channel) {
+    return (
+      <main className="main">
+        <EmptyState
+          title="No channel selected"
+          hint="Pick a channel from the sidebar, or click an agent to open a direct message."
+        />
+      </main>
+    );
+  }
+
+  const isDm = channel.kind === "dm";
+  const dmAgent = isDm ? agents.find((a) => a.dmChannelId === channel.id) ?? null : null;
+  const title = dmAgent ? dmAgent.name : channel.name;
+
+  return (
+    <main className="main">
+      <header className="channel-head">
+        <div className="channel-head-main">
+          <h1 className="channel-title">
+            {isDm ? <span className="channel-kind">DM</span> : <span className="channel-hash">#</span>}
+            {title}
+          </h1>
+          {channel.description ? <p className="channel-desc">{channel.description}</p> : null}
+        </div>
+        <div className="channel-members" title={members.map((m) => m.name).join(", ")}>
+          <div className="avatar-stack">
+            {members.slice(0, 6).map((m) => (
+              <Avatar key={m.id} name={m.name} kind={m.kind} size="sm" />
+            ))}
+          </div>
+          <span className="muted small">
+            {members.length} {members.length === 1 ? "member" : "members"}
+          </span>
+        </div>
+      </header>
+
+      <div className="message-list" ref={listRef} onScroll={onScroll}>
+        {loading && messages.length === 0 ? (
+          <div className="message-loading">
+            <Spinner label="Loading messages…" />
+          </div>
+        ) : null}
+        {!loading && messages.length === 0 && !error ? (
+          <EmptyState
+            title={isDm ? "Start the conversation" : "Nothing here yet"}
+            hint={
+              isDm
+                ? "Messages you send here go straight to " + title + "."
+                : "Messages posted by agents and by you will show up in order."
+            }
+          />
+        ) : null}
+        <ErrorNote message={error} />
+        {messages.map((message) => (
+          <MessageRow
+            key={message.id}
+            message={message}
+            agents={agents}
+            overview={overview}
+            now={now}
+            onSelectAgent={onSelectAgent}
+            onOpenRun={onOpenRun}
+            onResolveApproval={onResolveApproval}
+          />
+        ))}
+      </div>
+
+      <div className="composer">
+        <textarea
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={onKeyDown}
+          placeholder={"Message " + (isDm ? title : "#" + channel.name) + " — Enter to send, Shift+Enter for a new line"}
+          rows={2}
+          disabled={sending}
+        />
+        <div className="composer-foot">
+          <span className="muted small">{sendError ? <span className="text-red">{sendError}</span> : "Posting as you"}</span>
+          <button type="button" className="btn btn-primary" onClick={() => void send()} disabled={sending || !draft.trim()}>
+            {sending ? "Sending…" : "Send"}
+          </button>
+        </div>
+      </div>
+    </main>
+  );
+}
+
+// ---------- rows ----------
+
+interface MessageRowProps {
+  message: ChannelMessage;
+  agents: Agent[];
+  overview: Overview | null;
+  now: number;
+  onSelectAgent: (agentId: string) => void;
+  onOpenRun: (agentId: string, runId: string) => void;
+  onResolveApproval: (approvalId: string, decision: "approve" | "deny") => Promise<void>;
+}
+
+function MessageRow({ message, agents, overview, onSelectAgent, onOpenRun, onResolveApproval }: MessageRowProps) {
+  const isAgentAuthor = message.authorKind === "principal" || message.authorKind === "session";
+  const authorAgent = isAgentAuthor ? agents.find((a) => a.id === message.authorId) ?? null : null;
+  const time = (
+    <time className="msg-time" dateTime={message.createdAt} title={fullTime(message.createdAt)}>
+      {clockTime(message.createdAt)}
+    </time>
+  );
+  const runPill =
+    message.runId && isAgentAuthor ? (
+      <button
+        type="button"
+        className="run-pill"
+        title="Open this run in the inspector"
+        onClick={() => onOpenRun(message.authorId, message.runId as string)}
+      >
+        run · {message.runId.slice(0, 8)}
+      </button>
+    ) : null;
+
+  if (message.kind === "denial") {
+    return (
+      <div className="msg-system msg-denial">
+        <span className="msg-glyph">⛔</span>
+        <div className="msg-system-body">
+          <MessageContent content={message.content} />
+          <div className="msg-system-meta">
+            {isAgentAuthor ? (
+              <AuthorButton name={message.authorName} onClick={() => onSelectAgent(message.authorId)} />
+            ) : (
+              <span>{message.authorName}</span>
+            )}
+            {runPill}
+            {time}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (message.kind === "spawn") {
+    return (
+      <div className="msg-system msg-spawn">
+        <span className="msg-glyph">⑂</span>
+        <div className="msg-system-body">
+          <MessageContent content={message.content} />
+          <div className="msg-system-meta">
+            {isAgentAuthor ? (
+              <AuthorButton name={message.authorName} onClick={() => onSelectAgent(message.authorId)} />
+            ) : (
+              <span>{message.authorName}</span>
+            )}
+            {runPill}
+            {time}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (message.kind === "system") {
+    return (
+      <div className="msg-notice">
+        <span>{message.content}</span>
+        {time}
+      </div>
+    );
+  }
+
+  if (message.kind === "approval") {
+    const approval = message.approvalId
+      ? (overview?.approvals ?? []).find((a) => a.id === message.approvalId) ?? null
+      : null;
+    return (
+      <ApprovalCard
+        message={message}
+        approval={approval}
+        overview={overview}
+        time={time}
+        onSelectAgent={onSelectAgent}
+        onResolveApproval={onResolveApproval}
+      />
+    );
+  }
+
+  const isUser = message.authorKind === "user";
+  return (
+    <div className={"msg" + (isUser ? " msg-user" : "")}>
+      <Avatar name={message.authorName} kind={message.authorKind} />
+      <div className="msg-body">
+        <div className="msg-head">
+          {isAgentAuthor ? (
+            <AuthorButton name={message.authorName} onClick={() => onSelectAgent(message.authorId)} />
+          ) : (
+            <span className="msg-author">{isUser ? "you" : message.authorName}</span>
+          )}
+          {message.authorKind === "session" ? <Tag tone="purple">session</Tag> : null}
+          {authorAgent && authorAgent.status === "busy" ? <Tag tone="purple">busy</Tag> : null}
+          {runPill}
+          {time}
+        </div>
+        <MessageContent content={message.content} />
+      </div>
+    </div>
+  );
+}
+
+function AuthorButton({ name, onClick }: { name: string; onClick: () => void }) {
+  return (
+    <button type="button" className="msg-author msg-author-btn" onClick={onClick} title="Inspect this agent">
+      {name}
+    </button>
+  );
+}
+
+function ApprovalCard({
+  message,
+  approval,
+  overview,
+  time,
+  onSelectAgent,
+  onResolveApproval,
+}: {
+  message: ChannelMessage;
+  approval: ApprovalRequest | null;
+  overview: Overview | null;
+  time: ReactNode;
+  onSelectAgent: (agentId: string) => void;
+  onResolveApproval: (approvalId: string, decision: "approve" | "deny") => Promise<void>;
+}) {
+  const [busy, setBusy] = useState<"approve" | "deny" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const pending = approval !== null && approval.status === "pending";
+  const statusLabel = approval ? approval.status : "resolved";
+
+  const decide = async (decision: "approve" | "deny") => {
+    if (!message.approvalId) return;
+    setBusy(decision);
+    setError(null);
+    try {
+      await onResolveApproval(message.approvalId, decision);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to " + decision);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const channelNames = approval
+    ? approval.payload.channelIds.map((id) => {
+        const channel = (overview?.channels ?? []).find((c) => c.id === id);
+        return channel ? "#" + channel.name : id;
+      })
+    : [];
+  const requesterIsAgent =
+    message.authorKind === "principal" || message.authorKind === "session";
+
+  return (
+    <div className={"approval-card" + (pending ? "" : " approval-card-resolved")}>
+      <div className="approval-head">
+        <span className="msg-glyph">✋</span>
+        <span className="approval-title">Approval requested</span>
+        <span className={"approval-status approval-status-" + statusLabel}>{statusLabel}</span>
+        {time}
+      </div>
+      <div className="approval-body">
+        <div className="approval-line">
+          {requesterIsAgent ? (
+            <AuthorButton name={message.authorName} onClick={() => onSelectAgent(message.authorId)} />
+          ) : (
+            <span className="msg-author">{message.authorName}</span>
+          )}
+          <span className="muted"> wants to create a new principal</span>
+        </div>
+        {approval ? (
+          <dl className="approval-facts">
+            <dt>Name</dt>
+            <dd>{approval.payload.name}</dd>
+            {approval.payload.description ? (
+              <>
+                <dt>About</dt>
+                <dd>{approval.payload.description}</dd>
+              </>
+            ) : null}
+            <dt>Preset</dt>
+            <dd>
+              <Tag tone="purple">{approval.payload.policy.preset}</Tag>
+              <span className="muted small">
+                {" "}
+                {approval.payload.policy.statements.length} statement
+                {approval.payload.policy.statements.length === 1 ? "" : "s"}
+              </span>
+            </dd>
+            <dt>Channels</dt>
+            <dd>{channelNames.length > 0 ? channelNames.join(", ") : <span className="muted">none</span>}</dd>
+          </dl>
+        ) : null}
+        {message.content ? <MessageContent content={message.content} /> : null}
+        <ErrorNote message={error} />
+        {pending ? (
+          <div className="approval-actions">
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              disabled={busy !== null}
+              onClick={() => void decide("approve")}
+            >
+              {busy === "approve" ? "Approving…" : "Approve"}
+            </button>
+            <button
+              type="button"
+              className="btn btn-danger btn-sm"
+              disabled={busy !== null}
+              onClick={() => void decide("deny")}
+            >
+              {busy === "deny" ? "Denying…" : "Deny"}
+            </button>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+// ---------- content rendering (newlines + fenced code, no markdown lib) ----------
+
+const FENCE = /```([^\n`]*)\n?([\s\S]*?)```/g;
+
+export function MessageContent({ content }: { content: string }) {
+  const parts: ReactNode[] = [];
+  let last = 0;
+  let index = 0;
+  for (const match of content.matchAll(FENCE)) {
+    const start = match.index ?? 0;
+    if (start > last) {
+      parts.push(
+        <p key={"t" + index++} className="msg-text">
+          {content.slice(last, start)}
+        </p>,
+      );
+    }
+    const lang = match[1].trim();
+    parts.push(
+      <pre key={"c" + index++} className="msg-code" data-lang={lang || undefined}>
+        <code>{match[2].replace(/\n$/, "")}</code>
+      </pre>,
+    );
+    last = start + match[0].length;
+  }
+  if (last < content.length) {
+    parts.push(
+      <p key={"t" + index++} className="msg-text">
+        {content.slice(last)}
+      </p>,
+    );
+  }
+  if (parts.length === 0) return null;
+  return <div className="msg-content">{parts}</div>;
+}
