@@ -271,8 +271,8 @@ cp deploy/volcengine/terraform.tfvars.example \
 | `RUNTIME_PROVIDER` | `local-process` | `container` for disposable local Runtime containers. |
 | `CODEX_SANDBOX_MODE` | `workspace-write` | Codex inner sandbox mode. |
 | `CODEX_TIMEOUT_MS` | `600000` | Maximum duration of one turn. |
-| `CHATTER_BUDGET` | `24` | Agent turns in one channel without a human message before it pauses. |
-| `TRACE_BUDGET` | `24` | Agent runs one human prompt may cause before its chain pauses. |
+| `CHATTER_BUDGET` | `32` | Agent turns in one channel without a human message before it pauses. |
+| `TRACE_BUDGET` | `32` | Agent runs one human prompt may cause before its chain pauses. |
 | `LOCAL_POC_DATA_ROOT` | Platform-specific | Local metadata, workspace, and session directory. |
 
 See [.env.example](.env.example) for all Runtime and resource-limit options.

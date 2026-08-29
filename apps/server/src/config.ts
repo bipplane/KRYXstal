@@ -57,9 +57,9 @@ const envSchema = z.object({
     .url()
     .default("https://ark.cn-beijing.volces.com/api/v3"),
   /** Agent-to-agent turns allowed in one channel before a human has to speak again. */
-  CHATTER_BUDGET: z.coerce.number().int().min(1).default(24),
+  CHATTER_BUDGET: z.coerce.number().int().min(1).default(32),
   /** Agent runs one human prompt may cause in total (across channels) before pausing. */
-  TRACE_BUDGET: z.coerce.number().int().min(1).default(24),
+  TRACE_BUDGET: z.coerce.number().int().min(1).default(32),
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
 });
 

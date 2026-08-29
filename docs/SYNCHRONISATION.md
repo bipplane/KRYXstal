@@ -153,7 +153,9 @@ other participant has passed since the last posted message the round ends.
 This is what lets three agents "take turns" without mentioning each other.
 
 `CHATTER_BUDGET` (agent turns in a channel without a human message) and
-`TRACE_BUDGET` (runs one prompt may cause) default to 24 and are configurable.
+`TRACE_BUDGET` (runs one prompt may cause) default to 32 and are configurable.
+A ten-step countdown with N agents costs roughly 3N + 10 runs: 18 were
+observed with three agents, 24 with five.
 
 ## Demo
 

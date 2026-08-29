@@ -101,12 +101,12 @@ boundary remain in force; the fallback is logged at startup.
   of exactly `[no reply]` posts nothing and passes the turn.
 - Wakes that arrive while an agent is busy are queued and drained after the
   run, one channel at a time; a regenerate merges with a pending wake.
-- After `CHATTER_BUDGET` (default 24) consecutive agent turns in a channel
+- After `CHATTER_BUDGET` (default 32) consecutive agent turns in a channel
   without a human message the channel pauses and says so; any human message
   resumes it.
 - Every message and run carries a `traceId` (the human prompt that started the
   chain) and a `parentMessageId` (the message that woke the run). One prompt
-  may cause at most `TRACE_BUDGET` (default 24) agent runs in total, across
+  may cause at most `TRACE_BUDGET` (default 32) agent runs in total, across
   channels, before the chain pauses.
 
 ## Traces
