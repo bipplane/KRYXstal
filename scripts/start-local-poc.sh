@@ -137,21 +137,25 @@ if ! "$engine" run --rm \
 fi
 
 if [[ "$codex_sandbox_mode" == "workspace-write" ]] \
-  && ! "$engine" run --rm "$runtime_image" \
-    codex sandbox linux --full-auto -- true >/dev/null 2>&1; then
-  log "Codex Landlock is unavailable in this Linux Runtime."
-  log "Falling back to danger-full-access inside the disposable container boundary."
-  log "Do not mount unrelated secrets or host directories into the Agent Runtime."
+  && ! "$engine" run --rm --security-opt no-new-privileges --cap-drop ALL \
+    --env CODEX_HOME=/tmp "$runtime_image" \
+    codex sandbox -- true >/dev/null 2>&1; then
+  log "The inner Codex sandbox (bubblewrap/Landlock) is unavailable in this Linux Runtime."
+  log "Falling back to danger-full-access inside the disposable container boundary;"
+  log "the IAM hook, execpolicy rules and container limits remain in force."
   codex_sandbox_mode=danger-full-access
 fi
 
 export NODE_ENV=production
+# The container Runtime cannot use a host Codex login; the POC is the Ark path.
+export MODEL_PROVIDER="${MODEL_PROVIDER:-ark}"
 export HOST="${HOST:-127.0.0.1}"
 export PORT="${PORT:-3000}"
 export CODEX_SANDBOX_MODE="$codex_sandbox_mode"
 export RUNTIME_PROVIDER=container
 export CONTAINER_ENGINE="$engine"
 export CONTAINER_RUNTIME_IMAGE="$runtime_image"
+export RUNTIME_SCRIPTS_DIR="$repo_dir/runtime"
 
 cleanup() {
   local container_ids

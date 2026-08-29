@@ -1,670 +1,403 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, ApiError, setAuthToken } from "./api";
-import type { Agent, AgentRun, Message, SystemInfo } from "./types";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { api, ApiError, setAuthToken, setUnauthorizedHandler } from "./api";
+import AgentWizard from "./components/AgentWizard";
+import ChannelDialog from "./components/ChannelDialog";
+import ChannelView from "./components/ChannelView";
+import Inspector, { type RunFocus } from "./components/Inspector";
+import Sidebar from "./components/Sidebar";
+import { Spinner } from "./components/ui";
+import type { Agent, AgentInput, Channel, Overview, PolicyPresets, SystemInfo } from "./types";
 
-const starterPrompts = [
-  "Create a small TypeScript CLI that prints a weather summary from sample JSON.",
-  "Inspect this workspace and explain what you would improve first.",
-  "Build a responsive single-page todo app with tests.",
-];
+const TOKEN_KEY = "launchpad-token";
+const OVERVIEW_POLL_MS = 2000;
 
-const emptyForm = {
-  name: "",
-  description: "",
-  instructions:
-    "Help me build and test software in this workspace. Keep changes small and explain the result.",
-};
+type AuthState = "checking" | "locked" | "open";
 
-function formatTime(value: string): string {
-  return new Intl.DateTimeFormat(undefined, {
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(value));
+type WizardState = { mode: "create" } | { mode: "edit"; agent: Agent };
+
+function readStoredToken(): string {
+  try {
+    return window.localStorage.getItem(TOKEN_KEY) ?? "";
+  } catch {
+    return "";
+  }
 }
 
-function StatusPill({ status }: { status: Agent["status"] }) {
-  return (
-    <span className={"status status-" + status}>
-      <span className="status-dot" />
-      {status}
-    </span>
-  );
+function storeToken(token: string): void {
+  try {
+    if (token) window.localStorage.setItem(TOKEN_KEY, token);
+    else window.localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    // localStorage may be unavailable; the token still lives in memory for this session.
+  }
 }
 
-function Spinner() {
-  return <span className="spinner" aria-label="Loading" />;
+function pickDefaultChannel(channels: Channel[]): string | null {
+  const visible = channels.filter((c) => c.kind !== "dm" && !c.archivedAt);
+  const general = visible.find((c) => c.name === "general" && c.kind !== "system");
+  return (general ?? visible.find((c) => c.kind === "public") ?? visible[0])?.id ?? null;
 }
 
 export default function App() {
-  const [agents, setAgents] = useState<Agent[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [auth, setAuth] = useState<AuthState>("checking");
+  const [authRequired, setAuthRequired] = useState(false);
+  const [authNotice, setAuthNotice] = useState<string | null>(null);
+  const [bootError, setBootError] = useState<string | null>(null);
+
   const [system, setSystem] = useState<SystemInfo | null>(null);
-  const [showCreate, setShowCreate] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
-  const [form, setForm] = useState(emptyForm);
-  const [prompt, setPrompt] = useState("");
-  const [activeRun, setActiveRun] = useState<AgentRun | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [authRequired, setAuthRequired] = useState<boolean | null>(null);
-  const [authInput, setAuthInput] = useState("");
-  const messageEnd = useRef<HTMLDivElement>(null);
-  const selectedIdRef = useRef<string | null>(null);
-  const mountedRef = useRef(true);
-  const pollingRunIds = useRef(new Set<string>());
-  selectedIdRef.current = selectedId;
+  const [presets, setPresets] = useState<PolicyPresets | null>(null);
+  const [overview, setOverview] = useState<Overview | null>(null);
+  const [overviewError, setOverviewError] = useState<string | null>(null);
 
-  const selected = useMemo(
-    () => agents.find((agent) => agent.id === selectedId) ?? null,
-    [agents, selectedId],
-  );
+  const [selectedChannelId, setSelectedChannelId] = useState<string | null>(null);
+  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+  const [runFocus, setRunFocus] = useState<RunFocus | null>(null);
+  const [wizard, setWizard] = useState<WizardState | null>(null);
+  const [channelDialog, setChannelDialog] = useState(false);
+  const pickedDefault = useRef(false);
+  const missingChannelPolls = useRef(0);
+  const missingAgentPolls = useRef(0);
 
-  const refreshAgents = useCallback(async () => {
-    const { agents: next } = await api.listAgents();
-    setAgents(next);
-    setSelectedId((current) =>
-      current && next.some((agent) => agent.id === current)
-        ? current
-        : (next[0]?.id ?? null),
-    );
+  // ---------- auth gate ----------
+
+  const lock = useCallback((notice: string | null) => {
+    setAuthToken("");
+    storeToken("");
+    setAuthNotice(notice);
+    setAuth("locked");
   }, []);
-
-  const refreshMessages = useCallback(async (agentId: string) => {
-    const result = await api.messages(agentId);
-    if (mountedRef.current && selectedIdRef.current === agentId) {
-      setMessages(result.messages);
-    }
-  }, []);
-
-  const bootstrap = useCallback(async () => {
-    await Promise.all([refreshAgents(), api.system().then(setSystem)]);
-  }, [refreshAgents]);
 
   useEffect(() => {
-    mountedRef.current = true;
-    void api
-      .auth()
-      .then(async ({ required }) => {
-        if (!mountedRef.current) return;
+    setUnauthorizedHandler(() => lock("That token was rejected. Enter a valid token to continue."));
+    return () => setUnauthorizedHandler(null);
+  }, [lock]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { required } = await api.auth();
+        if (cancelled) return;
         setAuthRequired(required);
-        if (!required) await bootstrap();
-      })
-      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
-    return () => {
-      mountedRef.current = false;
-    };
-  }, [bootstrap]);
-
-  useEffect(() => {
-    setActiveRun(null);
-    setShowSettings(false);
-    if (!selectedId) {
-      setMessages([]);
-      return;
-    }
-    void Promise.all([refreshMessages(selectedId), api.runs(selectedId)])
-      .then(([, result]) => {
-        if (selectedIdRef.current !== selectedId) return;
-        const latest = result.runs[0] ?? null;
-        setActiveRun(latest);
-        if (latest && ["queued", "running"].includes(latest.status)) {
-          void pollRun(latest.id, selectedId).catch((reason) =>
-            setError(reason instanceof Error ? reason.message : String(reason)),
-          );
-        }
-      })
-      .catch((reason) =>
-        setError(reason instanceof Error ? reason.message : String(reason)),
-      );
-  }, [refreshMessages, selectedId]);
-
-  useEffect(() => {
-    if (selected) {
-      setForm({
-        name: selected.name,
-        description: selected.description,
-        instructions: selected.instructions,
-      });
-    }
-  }, [selected]);
-
-  useEffect(() => {
-    messageEnd.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, activeRun]);
-
-  const createAgent = async (event: React.FormEvent) => {
-    event.preventDefault();
-    setBusy(true);
-    setError(null);
-    try {
-      const { agent } = await api.createAgent(form);
-      await refreshAgents();
-      setSelectedId(agent.id);
-      setShowCreate(false);
-      setForm(emptyForm);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const saveAgent = async (event: React.FormEvent) => {
-    event.preventDefault();
-    if (!selected) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await api.updateAgent(selected.id, form);
-      await refreshAgents();
-      setShowSettings(false);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const toggleAgent = async () => {
-    if (!selected) return;
-    setBusy(true);
-    setError(null);
-    try {
-      if (selected.status === "stopped") {
-        await api.startAgent(selected.id);
-      } else {
-        await api.stopAgent(selected.id);
-      }
-      await refreshAgents();
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const deleteAgent = async () => {
-    if (!selected) return;
-    if (!window.confirm("Delete " + selected.name + "? Its workspace will be archived.")) {
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    try {
-      await api.deleteAgent(selected.id);
-      await refreshAgents();
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const pollRun = async (runId: string, agentId: string) => {
-    if (pollingRunIds.current.has(runId)) return;
-    pollingRunIds.current.add(runId);
-    try {
-      while (mountedRef.current) {
-        await new Promise((resolve) => window.setTimeout(resolve, 900));
-        if (!mountedRef.current) return;
-        const result = await api.run(runId);
-        if (selectedIdRef.current === agentId) setActiveRun(result.run);
-        if (!["queued", "running"].includes(result.run.status)) {
-          await Promise.all([refreshMessages(agentId), refreshAgents()]);
+        if (!required) {
+          setAuth("open");
           return;
         }
+        const stored = readStoredToken();
+        if (stored) {
+          setAuthToken(stored);
+          setAuth("open");
+        } else {
+          setAuth("locked");
+        }
+      } catch (err) {
+        if (cancelled) return;
+        setBootError(err instanceof Error ? err.message : "Could not reach the server");
+        setAuth("locked");
       }
-    } finally {
-      pollingRunIds.current.delete(runId);
-    }
-  };
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
-  const sendMessage = async (event: React.FormEvent) => {
-    event.preventDefault();
-    if (!selected || !prompt.trim()) return;
-    const content = prompt.trim();
-    setPrompt("");
-    setError(null);
+  // ---------- data loading ----------
+
+  const refreshOverview = useCallback(async () => {
     try {
-      const result = await api.sendMessage(selected.id, content);
-      if (selectedIdRef.current === selected.id) {
-        setMessages((current) => [...current, result.message]);
-        setActiveRun(result.run);
+      const next = await api.overview();
+      setOverview(next);
+      setOverviewError(null);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) return;
+      setOverviewError(err instanceof Error ? err.message : "Failed to load overview");
+    }
+  }, []);
+
+  useEffect(() => {
+    if (auth !== "open") return;
+    let cancelled = false;
+    setBootError(null);
+    void api
+      .system()
+      .then((info) => {
+        if (!cancelled) setSystem(info);
+      })
+      .catch(() => undefined);
+    void api
+      .policyPresets()
+      .then((p) => {
+        if (!cancelled) setPresets(p);
+      })
+      .catch(() => undefined);
+    void refreshOverview();
+    const timer = window.setInterval(() => void refreshOverview(), OVERVIEW_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [auth, refreshOverview]);
+
+  // Pick a default channel the first time the overview lands; drop selections that have
+  // gone missing for two consecutive polls (one miss can be an in-flight poll racing a create).
+  useEffect(() => {
+    if (!overview) return;
+    if (!pickedDefault.current) {
+      pickedDefault.current = true;
+      setSelectedChannelId((current) => current ?? pickDefaultChannel(overview.channels));
+      return;
+    }
+    setSelectedChannelId((current) => {
+      if (!current || overview.channels.some((c) => c.id === current)) {
+        missingChannelPolls.current = 0;
+        return current ?? pickDefaultChannel(overview.channels);
       }
-      setAgents((current) =>
-        current.map((agent) =>
-          agent.id === selected.id ? { ...agent, status: "busy" } : agent,
-        ),
-      );
-      await pollRun(result.run.id, selected.id);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-      setActiveRun(null);
-      await refreshAgents();
-    }
-  };
+      missingChannelPolls.current += 1;
+      if (missingChannelPolls.current < 2) return current;
+      missingChannelPolls.current = 0;
+      return pickDefaultChannel(overview.channels);
+    });
+    setSelectedAgentId((current) => {
+      if (!current || overview.agents.some((a) => a.id === current)) {
+        missingAgentPolls.current = 0;
+        return current;
+      }
+      missingAgentPolls.current += 1;
+      if (missingAgentPolls.current < 2) return current;
+      missingAgentPolls.current = 0;
+      return null;
+    });
+  }, [overview]);
 
-  const unlock = async (event: React.FormEvent) => {
-    event.preventDefault();
-    setBusy(true);
-    setError(null);
-    setAuthToken(authInput);
-    try {
-      await bootstrap();
-      setAuthRequired(false);
-      setAuthInput("");
-    } catch (reason) {
-      if (reason instanceof ApiError && reason.status === 401) {
-        setError("The access token is not valid.");
+  const selectedChannel = useMemo(
+    () => overview?.channels.find((c) => c.id === selectedChannelId) ?? null,
+    [overview, selectedChannelId],
+  );
+  const selectedAgent = useMemo(
+    () => overview?.agents.find((a) => a.id === selectedAgentId) ?? null,
+    [overview, selectedAgentId],
+  );
+
+  // ---------- handlers ----------
+
+  const selectAgentAndDm = useCallback((agent: Agent) => {
+    setSelectedAgentId(agent.id);
+    if (agent.dmChannelId) setSelectedChannelId(agent.dmChannelId);
+  }, []);
+
+  const selectAgentById = useCallback((agentId: string) => {
+    setSelectedAgentId(agentId);
+  }, []);
+
+  const openRun = useCallback((agentId: string, runId: string) => {
+    setSelectedAgentId(agentId);
+    setRunFocus({ agentId, runId, nonce: Date.now() });
+  }, []);
+
+  const startAgent = useCallback(
+    async (agent: Agent) => {
+      await api.startAgent(agent.id);
+      await refreshOverview();
+    },
+    [refreshOverview],
+  );
+
+  const stopAgent = useCallback(
+    async (agent: Agent) => {
+      await api.stopAgent(agent.id);
+      await refreshOverview();
+    },
+    [refreshOverview],
+  );
+
+  const deleteAgent = useCallback(
+    async (agent: Agent) => {
+      await api.deleteAgent(agent.id);
+      setSelectedAgentId((current) => (current === agent.id ? null : current));
+      setSelectedChannelId((current) => (current && current === agent.dmChannelId ? null : current));
+      await refreshOverview();
+    },
+    [refreshOverview],
+  );
+
+  const submitWizard = useCallback(
+    async (input: AgentInput) => {
+      if (wizard?.mode === "edit") {
+        await api.updateAgent(wizard.agent.id, input);
+        setSelectedAgentId(wizard.agent.id);
       } else {
-        setError(reason instanceof Error ? reason.message : String(reason));
+        const { agent } = await api.createAgent(input);
+        setSelectedAgentId(agent.id);
       }
-    } finally {
-      setBusy(false);
-    }
-  };
+      setWizard(null);
+      await refreshOverview();
+    },
+    [wizard, refreshOverview],
+  );
 
-  if (authRequired === null) {
+  const submitChannel = useCallback(
+    async (input: { name: string; description: string; memberIds: string[] }) => {
+      const { channel } = await api.createChannel(input);
+      setChannelDialog(false);
+      setSelectedChannelId(channel.id);
+      await refreshOverview();
+    },
+    [refreshOverview],
+  );
+
+  const resolveApproval = useCallback(
+    async (approvalId: string, decision: "approve" | "deny") => {
+      await api.resolveApproval(approvalId, decision);
+      await refreshOverview();
+    },
+    [refreshOverview],
+  );
+
+  // ---------- render ----------
+
+  if (auth === "checking") {
     return (
-      <main className="auth-screen">
-        <section className="auth-card" aria-live="polite">
-          <div className="brand-mark">A</div>
-          <span className="eyebrow">Agent Launchpad</span>
-          <h1>Connecting to the control plane</h1>
-          {error ? <div className="error-banner" role="alert">{error}</div> : <Spinner />}
-        </section>
-      </main>
+      <div className="auth-screen">
+        <Spinner label="Connecting…" />
+      </div>
     );
   }
 
-  if (authRequired) {
+  if (auth === "locked") {
     return (
-      <main className="auth-screen">
-        <form className="auth-card" onSubmit={unlock}>
-          <div className="brand-mark">A</div>
-          <span className="eyebrow">Agent Launchpad</span>
-          <h1>Enter the access token</h1>
-          <p>This shared demo token is configured by the platform operator.</p>
-          {error && <div className="error-banner" role="alert">{error}</div>}
-          <label>
-            Access token
-            <input
-              autoFocus
-              type="password"
-              value={authInput}
-              onChange={(event) => setAuthInput(event.target.value)}
-              autoComplete="current-password"
-              required
-            />
-          </label>
-          <button className="button button-primary" disabled={busy || !authInput.trim()}>
-            {busy ? <Spinner /> : "Open Launchpad"}
-          </button>
-        </form>
-      </main>
+      <UnlockScreen
+        notice={bootError ?? authNotice}
+        required={authRequired}
+        onUnlock={(token) => {
+          setAuthToken(token);
+          storeToken(token);
+          setAuthNotice(null);
+          setBootError(null);
+          setAuth("open");
+        }}
+        onRetry={() => window.location.reload()}
+      />
     );
   }
+
+  const nonDmChannels = (overview?.channels ?? []).filter((c) => c.kind !== "dm" && !c.archivedAt);
 
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-mark">A</div>
-          <div>
-            <strong>Agent Launchpad</strong>
-            <span>
-              {system?.runtimeProvider === "container"
-                ? "Local container · Codex CLI"
-                : "ECS / Docker · Codex CLI"}
-            </span>
-          </div>
+    <div className="app">
+      {overviewError ? (
+        <div className="banner banner-error">
+          {overviewError}
+          <button type="button" className="link-btn" onClick={() => void refreshOverview()}>
+            retry
+          </button>
         </div>
+      ) : null}
+      <div className="layout">
+        <Sidebar
+          system={system}
+          overview={overview}
+          selectedChannelId={selectedChannelId}
+          selectedAgentId={selectedAgentId}
+          onSelectChannel={setSelectedChannelId}
+          onSelectAgent={selectAgentAndDm}
+          onNewAgent={() => setWizard({ mode: "create" })}
+          onNewChannel={() => setChannelDialog(true)}
+        />
+        <ChannelView
+          channel={selectedChannel}
+          overview={overview}
+          onSelectAgent={selectAgentById}
+          onOpenRun={openRun}
+          onResolveApproval={resolveApproval}
+        />
+        <Inspector
+          agent={selectedAgent}
+          overview={overview}
+          runFocus={runFocus}
+          onStart={startAgent}
+          onStop={stopAgent}
+          onEdit={(agent) => setWizard({ mode: "edit", agent })}
+          onDelete={deleteAgent}
+          onSelectChannel={setSelectedChannelId}
+          onSelectAgent={(agent) => setSelectedAgentId(agent.id)}
+          onClear={() => setSelectedAgentId(null)}
+        />
+      </div>
 
-        <button
-          className="button button-primary create-button"
-          onClick={() => {
-            setForm(emptyForm);
-            setShowCreate(true);
-          }}
-        >
-          <span>＋</span> Create Agent
-        </button>
+      {wizard ? (
+        <AgentWizard
+          key={wizard.mode === "edit" ? wizard.agent.id : "create"}
+          mode={wizard.mode}
+          agent={wizard.mode === "edit" ? wizard.agent : undefined}
+          presets={presets}
+          channels={nonDmChannels}
+          initialChannelIds={
+            wizard.mode === "edit"
+              ? nonDmChannels.filter((c) => c.memberIds.includes(wizard.agent.id)).map((c) => c.id)
+              : []
+          }
+          onClose={() => setWizard(null)}
+          onSubmit={submitWizard}
+        />
+      ) : null}
 
-        <div className="sidebar-label">
-          <span>Your Agents</span>
-          <span>{agents.length}</span>
-        </div>
-        <nav className="agent-list">
-          {agents.map((agent) => (
-            <button
-              className={"agent-card " + (agent.id === selectedId ? "selected" : "")}
-              key={agent.id}
-              onClick={() => setSelectedId(agent.id)}
-            >
-              <div className="agent-avatar">{agent.name.slice(0, 1).toUpperCase()}</div>
-              <div className="agent-card-copy">
-                <strong>{agent.name}</strong>
-                <span>{agent.description || "Coding Agent"}</span>
-              </div>
-              <span className={"mini-dot mini-" + agent.status} />
-            </button>
-          ))}
-          {agents.length === 0 && (
-            <div className="empty-sidebar">
-              <span>◇</span>
-              Create your first coding Agent.
-            </div>
-          )}
-        </nav>
+      {channelDialog ? (
+        <ChannelDialog agents={overview?.agents ?? []} onClose={() => setChannelDialog(false)} onSubmit={submitChannel} />
+      ) : null}
+    </div>
+  );
+}
 
-        <div className="runtime-card">
-          <span className="eyebrow">Runtime</span>
-          <strong>{system?.runtime ?? "Checking…"}</strong>
-          <span>
-            {system?.arkModel ?? "Ark model not configured"}
-            {system?.containerEngine ? " · " + system.containerEngine : ""}
-          </span>
-        </div>
-      </aside>
-
-      <main className="main">
-        {!system?.arkConfigured || !system?.codexAvailable ? (
-          <div className="config-banner">
-            <span>!</span>
-            <div>
-              <strong>Runtime configuration needed</strong>
-              <p>
-                {!system?.arkConfigured
-                  ? "Set ARK_API_KEY and ARK_MODEL in .env before using the Playground."
-                  : system.runtimeProvider === "container"
-                    ? "The local container engine or Agent Runtime image is unavailable. Rerun npm run poc."
-                    : "Codex CLI was not found. Use the Docker image or install @openai/codex."}
-              </p>
-            </div>
-          </div>
-        ) : null}
-
-        {error && (
-          <div className="error-banner" role="alert">
-            <span>{error}</span>
-            <button onClick={() => setError(null)}>×</button>
-          </div>
-        )}
-
-        {selected ? (
+function UnlockScreen({
+  notice,
+  required,
+  onUnlock,
+  onRetry,
+}: {
+  notice: string | null;
+  required: boolean;
+  onUnlock: (token: string) => void;
+  onRetry: () => void;
+}) {
+  const [token, setToken] = useState("");
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    if (token.trim()) onUnlock(token.trim());
+  };
+  return (
+    <div className="auth-screen">
+      <form className="auth-card" onSubmit={submit}>
+        <div className="brand-name">Launchpad</div>
+        <h1>Unlock the control plane</h1>
+        <p>
+          {required
+            ? "This server requires an access token. It is stored locally in your browser."
+            : "The server could not be reached. Check that it is running, then try again."}
+        </p>
+        {notice ? <div className="error-note">{notice}</div> : null}
+        {required ? (
           <>
-            <header className="agent-header">
-              <div>
-                <div className="header-title-row">
-                  <h1>{selected.name}</h1>
-                  <StatusPill status={selected.status} />
-                </div>
-                <p>{selected.description || "A Codex coding Agent in an isolated workspace."}</p>
-              </div>
-              <div className="header-actions">
-                <button
-                  className="button button-ghost"
-                  onClick={() => setShowSettings((value) => !value)}
-                  disabled={busy || selected.status === "busy"}
-                >
-                  Settings
-                </button>
-                <button
-                  className="button button-ghost"
-                  onClick={toggleAgent}
-                  disabled={busy}
-                >
-                  {selected.status === "stopped" ? "Start" : "Stop"}
-                </button>
-                <button
-                  className="button button-danger"
-                  onClick={deleteAgent}
-                  disabled={busy || selected.status === "busy"}
-                >
-                  Delete
-                </button>
-              </div>
-            </header>
-
-            {showSettings && (
-              <form className="settings-panel" onSubmit={saveAgent}>
-                <div className="settings-title">
-                  <div>
-                    <span className="eyebrow">Agent configuration</span>
-                    <h2>Instructions and identity</h2>
-                  </div>
-                  <button type="button" onClick={() => setShowSettings(false)}>×</button>
-                </div>
-                <div className="form-grid">
-                  <label>
-                    Name
-                    <input
-                      value={form.name}
-                      onChange={(event) => setForm({ ...form, name: event.target.value })}
-                      required
-                      maxLength={80}
-                    />
-                  </label>
-                  <label>
-                    Description
-                    <input
-                      value={form.description}
-                      onChange={(event) =>
-                        setForm({ ...form, description: event.target.value })
-                      }
-                      maxLength={500}
-                    />
-                  </label>
-                </div>
-                <label>
-                  System instructions
-                  <textarea
-                    value={form.instructions}
-                    onChange={(event) =>
-                      setForm({ ...form, instructions: event.target.value })
-                    }
-                    rows={5}
-                    maxLength={10_000}
-                  />
-                </label>
-                <div className="panel-footer">
-                  <code>{selected.workspacePath}</code>
-                  <button className="button button-primary" disabled={busy}>
-                    {busy ? <Spinner /> : "Save changes"}
-                  </button>
-                </div>
-              </form>
-            )}
-
-            <section className="playground">
-              <div className="playground-topbar">
-                <div>
-                  <span className="eyebrow">Playground</span>
-                  <h2>Build something with your Agent</h2>
-                </div>
-                <div className="session-info">
-                  <span className="pulse" />
-                  {selected.codexThreadId ? "Session connected" : "New session"}
-                </div>
-              </div>
-
-              <div className="messages">
-                {messages.length === 0 && !activeRun ? (
-                  <div className="welcome">
-                    <div className="welcome-orbit">
-                      <div>⌁</div>
-                    </div>
-                    <h3>What should {selected.name} build?</h3>
-                    <p>
-                      The Agent can inspect files, write code, run commands, and continue the
-                      same Codex session across messages.
-                    </p>
-                    <div className="prompt-grid">
-                      {starterPrompts.map((item) => (
-                        <button key={item} onClick={() => setPrompt(item)}>
-                          <span>↗</span>
-                          {item}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                ) : (
-                  messages.map((message) => (
-                    <article className={"message message-" + message.role} key={message.id}>
-                      <div className="message-meta">
-                        <strong>{message.role === "user" ? "You" : selected.name}</strong>
-                        <span>{formatTime(message.createdAt)}</span>
-                      </div>
-                      <div className="message-body">{message.content}</div>
-                    </article>
-                  ))
-                )}
-                {activeRun && ["queued", "running"].includes(activeRun.status) && (
-                  <article className="message message-assistant thinking">
-                    <div className="message-meta">
-                      <strong>{selected.name}</strong>
-                      <span>working in the Agent workspace</span>
-                    </div>
-                    <div className="thinking-row">
-                      <Spinner />
-                      Codex is reading, editing, or running commands…
-                    </div>
-                  </article>
-                )}
-                {activeRun?.status === "failed" && (
-                  <article className="run-error">
-                    <strong>Run failed</strong>
-                    <span>{activeRun.error}</span>
-                  </article>
-                )}
-                <div ref={messageEnd} />
-              </div>
-
-              <form className="composer" onSubmit={sendMessage}>
-                <textarea
-                  value={prompt}
-                  onChange={(event) => setPrompt(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" && !event.shiftKey) {
-                      event.preventDefault();
-                      event.currentTarget.form?.requestSubmit();
-                    }
-                  }}
-                  placeholder={
-                    selected.status === "stopped"
-                      ? "Start this Agent to continue…"
-                      : "Describe what you want the Agent to do…"
-                  }
-                  disabled={
-                    selected.status === "stopped" ||
-                    selected.status === "busy" ||
-                    activeRun != null && ["queued", "running"].includes(activeRun.status)
-                  }
-                  rows={3}
-                />
-                <div className="composer-footer">
-                  <span>
-                    Enter to send · Shift + Enter for newline · {system?.codexSandboxMode ?? "checking sandbox"}
-                  </span>
-                  <button
-                    className="send-button"
-                    disabled={
-                      !prompt.trim() ||
-                      selected.status === "stopped" ||
-                      selected.status === "busy" ||
-                      (activeRun != null && ["queued", "running"].includes(activeRun.status))
-                    }
-                    aria-label="Send message"
-                  >
-                    ↑
-                  </button>
-                </div>
-              </form>
-            </section>
-          </>
-        ) : (
-          <div className="no-agent">
-            <div className="no-agent-art">A</div>
-            <span className="eyebrow">Agent Launchpad</span>
-            <h1>Your runtime is ready for an Agent.</h1>
-            <p>Create a workspace, give Codex a job, and continue the conversation here.</p>
-            <button
-              className="button button-primary"
-              onClick={() => {
-                setForm(emptyForm);
-                setShowCreate(true);
-              }}
-            >
-              Create your first Agent
-            </button>
-          </div>
-        )}
-      </main>
-
-      {showCreate && (
-        <div className="modal-backdrop" onMouseDown={() => setShowCreate(false)}>
-          <form
-            className="modal"
-            onSubmit={createAgent}
-            onMouseDown={(event) => event.stopPropagation()}
-          >
-            <div className="modal-heading">
-              <div>
-                <span className="eyebrow">New workspace</span>
-                <h2>Create an Agent</h2>
-                <p>Each Agent gets a persistent folder and a resumable Codex session.</p>
-              </div>
-              <button type="button" onClick={() => setShowCreate(false)}>×</button>
-            </div>
-            <label>
-              Name
+            <label className="field">
+              <span className="field-label">Access token</span>
               <input
                 autoFocus
-                placeholder="Frontend Builder"
-                value={form.name}
-                onChange={(event) => setForm({ ...form, name: event.target.value })}
-                required
-                maxLength={80}
+                type="password"
+                autoComplete="current-password"
+                value={token}
+                onChange={(e) => setToken(e.target.value)}
+                placeholder="paste token"
               />
             </label>
-            <label>
-              Description
-              <input
-                placeholder="Builds polished React prototypes"
-                value={form.description}
-                onChange={(event) =>
-                  setForm({ ...form, description: event.target.value })
-                }
-                maxLength={500}
-              />
-            </label>
-            <label>
-              Instructions
-              <textarea
-                value={form.instructions}
-                onChange={(event) =>
-                  setForm({ ...form, instructions: event.target.value })
-                }
-                rows={6}
-                maxLength={10_000}
-              />
-            </label>
-            <div className="modal-footer">
-              <button
-                type="button"
-                className="button button-ghost"
-                onClick={() => setShowCreate(false)}
-              >
-                Cancel
-              </button>
-              <button className="button button-primary" disabled={busy}>
-                {busy ? <Spinner /> : "Create Agent"}
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
+            <button type="submit" className="btn btn-primary btn-block" disabled={!token.trim()}>
+              Unlock
+            </button>
+          </>
+        ) : (
+          <button type="button" className="btn btn-primary btn-block" onClick={onRetry}>
+            Retry
+          </button>
+        )}
+      </form>
     </div>
   );
 }

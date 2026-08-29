@@ -1,7 +1,7 @@
 ARG NODE_IMAGE=node:22-bookworm-slim
 FROM ${NODE_IMAGE}
 
-ARG CODEX_VERSION=0.111.0
+ARG CODEX_VERSION=0.150.1
 ARG DEBIAN_MIRROR=""
 ARG DEBIAN_SECURITY_MIRROR=""
 ARG RUNTIME_APT_PACKAGES="ca-certificates git ripgrep"
@@ -22,6 +22,10 @@ RUN if [ -n "$DEBIAN_SECURITY_MIRROR" ]; then \
     && npm install --global "@openai/codex@${CODEX_VERSION}" \
     && codex --version \
     && rm -rf /var/lib/apt/lists/*
+
+# Runtime scripts (channel MCP server + IAM hook). The local POC also bind-mounts
+# the repo copy over this path so edits do not need an image rebuild.
+COPY runtime /opt/launchpad
 
 ENV CODEX_HOME=/codex-home
 ENV HOME=/tmp

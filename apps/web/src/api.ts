@@ -1,4 +1,15 @@
-import type { Agent, AgentRun, Message, SystemInfo } from "./types";
+import type {
+  Agent,
+  AgentInput,
+  AgentRun,
+  ApprovalRequest,
+  Channel,
+  ChannelMessage,
+  Decision,
+  Overview,
+  PolicyPresets,
+  SystemInfo,
+} from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -6,76 +17,90 @@ export class ApiError extends Error {
     public readonly status: number,
   ) {
     super(message);
+    this.name = "ApiError";
   }
 }
 
 let authToken = "";
+let unauthorizedHandler: (() => void) | null = null;
 
 export function setAuthToken(token: string): void {
   authToken = token.trim();
 }
 
-async function request<T>(url: string, options?: RequestInit): Promise<T> {
-  const headers = {
-    ...(options?.body ? { "Content-Type": "application/json" } : {}),
+/** Called whenever any request comes back 401. */
+export function setUnauthorizedHandler(handler: (() => void) | null): void {
+  unauthorizedHandler = handler;
+}
+
+export async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
+  const headers: Record<string, string> = {
+    ...(options.body ? { "Content-Type": "application/json" } : {}),
     ...(authToken ? { Authorization: "Bearer " + authToken } : {}),
-    ...options?.headers,
+    ...((options.headers as Record<string, string> | undefined) ?? {}),
   };
-  const response = await fetch(url, {
-    ...options,
-    headers,
-  });
+  let response: Response;
+  try {
+    response = await fetch(url, { ...options, headers });
+  } catch (error) {
+    throw new ApiError(error instanceof Error ? error.message : "Network error", 0);
+  }
   const data = (await response.json().catch(() => ({}))) as T & { error?: string };
   if (!response.ok) {
-    throw new ApiError(data.error ?? "Request failed", response.status);
+    if (response.status === 401 && unauthorizedHandler) {
+      unauthorizedHandler();
+    }
+    throw new ApiError(data.error ?? "Request failed (" + response.status + ")", response.status);
   }
   return data;
+}
+
+function json(method: string, body: unknown): RequestInit {
+  return { method, body: JSON.stringify(body) };
 }
 
 export const api = {
   auth: () => request<{ required: boolean }>("/api/auth"),
   system: () => request<SystemInfo>("/api/system"),
-  listAgents: () => request<{ agents: Agent[] }>("/api/agents"),
-  createAgent: (body: {
-    name: string;
-    description: string;
-    instructions: string;
-  }) =>
-    request<{ agent: Agent }>("/api/agents", {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
-  updateAgent: (
-    id: string,
-    body: { name: string; description: string; instructions: string },
-  ) =>
-    request<{ agent: Agent }>("/api/agents/" + id, {
-      method: "PATCH",
-      body: JSON.stringify(body),
-    }),
+  overview: () => request<Overview>("/api/overview"),
+  policyPresets: () => request<PolicyPresets>("/api/policy/presets"),
+
+  createAgent: (body: AgentInput) => request<{ agent: Agent }>("/api/agents", json("POST", body)),
+  updateAgent: (id: string, body: Partial<AgentInput>) =>
+    request<{ agent: Agent }>("/api/agents/" + encodeURIComponent(id), json("PATCH", body)),
   deleteAgent: (id: string) =>
-    request<{ archivedWorkspace: string }>("/api/agents/" + id, {
+    request<{ archivedWorkspace: string }>("/api/agents/" + encodeURIComponent(id), {
       method: "DELETE",
     }),
   startAgent: (id: string) =>
-    request<{ agent: Agent }>("/api/agents/" + id + "/start", {
+    request<{ agent: Agent }>("/api/agents/" + encodeURIComponent(id) + "/start", {
       method: "POST",
     }),
   stopAgent: (id: string) =>
-    request<{ agent: Agent }>("/api/agents/" + id + "/stop", {
+    request<{ agent: Agent }>("/api/agents/" + encodeURIComponent(id) + "/stop", {
       method: "POST",
     }),
-  messages: (id: string) =>
-    request<{ messages: Message[] }>("/api/agents/" + id + "/messages"),
-  runs: (id: string) =>
-    request<{ runs: AgentRun[] }>("/api/agents/" + id + "/runs"),
-  sendMessage: (id: string, content: string) =>
-    request<{ run: AgentRun; message: Message }>(
-      "/api/agents/" + id + "/messages",
-      {
-        method: "POST",
-        body: JSON.stringify({ content }),
-      },
+  runs: (id: string) => request<{ runs: AgentRun[] }>("/api/agents/" + encodeURIComponent(id) + "/runs"),
+  agentDecisions: (id: string) =>
+    request<{ decisions: Decision[] }>("/api/agents/" + encodeURIComponent(id) + "/decisions"),
+
+  messages: (channelId: string, limit = 200) =>
+    request<{ messages: ChannelMessage[] }>(
+      "/api/channels/" + encodeURIComponent(channelId) + "/messages?limit=" + String(limit),
     ),
-  run: (id: string) => request<{ run: AgentRun }>("/api/runs/" + id),
+  sendMessage: (channelId: string, content: string) =>
+    request<{ message: ChannelMessage }>(
+      "/api/channels/" + encodeURIComponent(channelId) + "/messages",
+      json("POST", { content }),
+    ),
+  createChannel: (body: { name: string; description: string; memberIds: string[] }) =>
+    request<{ channel: Channel }>("/api/channels", json("POST", body)),
+
+  resolveApproval: (id: string, decision: "approve" | "deny") =>
+    request<{ approval: ApprovalRequest }>(
+      "/api/approvals/" + encodeURIComponent(id),
+      json("POST", { decision }),
+    ),
+  decisions: (limit = 100) =>
+    request<{ decisions: Decision[] }>("/api/decisions?limit=" + String(limit)),
 };

@@ -19,6 +19,9 @@ services:
       AGENT_WORKSPACE_ROOT: /app/workspaces
       CODEX_HOME: /app/codex-home
       CODEX_SANDBOX_MODE: ${CODEX_SANDBOX_MODE:-workspace-write}
+      RUNTIME_SCRIPTS_DIR: /app/runtime
+      AGENT_API_BASE_URL: http://127.0.0.1:3000
+      USER_NAME: ${USER_NAME:-You}
     ports:
       - "${PUBLIC_PORT:-3000}:3000"
     volumes:

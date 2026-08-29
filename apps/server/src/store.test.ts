@@ -54,3 +54,44 @@ describe("JsonStore", () => {
     ]);
   });
 });
+
+describe("JsonStore migration", () => {
+  it("upgrades a v1 database to v2 with principals and legacy DM messages", async () => {
+    const { writeFile, mkdir } = await import("node:fs/promises");
+    const root = await mkdtemp(path.join(tmpdir(), "launchpad-store-migrate-"));
+    temporaryDirectories.push(root);
+    await mkdir(root, { recursive: true });
+    const file = path.join(root, "db.json");
+    await writeFile(
+      file,
+      JSON.stringify({
+        version: 1,
+        agents: [
+          {
+            id: "a1",
+            name: "Old",
+            description: "",
+            instructions: "",
+            status: "busy",
+            workspacePath: "/tmp/a1",
+            codexThreadId: "t1",
+            lastError: null,
+            createdAt: "2026-01-01T00:00:00.000Z",
+            updatedAt: "2026-01-01T00:00:00.000Z",
+          },
+        ],
+        messages: [
+          { id: "m1", agentId: "a1", runId: "r1", role: "user", content: "hi", createdAt: "2026-01-01T00:00:01.000Z" },
+        ],
+        runs: [],
+      }),
+    );
+    const store = new JsonStore(file);
+    await store.initialize();
+    const database = store.snapshot();
+    expect(database.version).toBe(2);
+    expect(database.agents[0]).toMatchObject({ kind: "principal", principalId: "a1", status: "ready" });
+    expect(database.agents[0]?.policy.preset).toBe("worker");
+    expect(database.messages[0]).toMatchObject({ channelId: "legacy-dm:a1", authorKind: "user" });
+  });
+});
