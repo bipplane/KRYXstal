@@ -138,10 +138,10 @@ kill.
 Every check leaves a `Decision` with `source: "sync"` and `effect: "allow"`
 or **`"conflict"`** — a third effect value, never confusable with a policy
 `deny` (HTTP 409 vs 403). Lost races are also stored as `conflict` messages
-in the channel (the channel view hides them so the conversation shows only
-outcomes; the trace view renders them, amber, ⇄), as a `conflict` run event,
-and on the run card ("lost race", "regenerate", "no reply"). The trace view
-shows the regenerate run under the message that won.
+in the channel — hidden in the channel and trace views so both show only
+outcomes — and surface as a `conflict` run event and on the run card ("lost
+race", "regenerate", "no reply"). The trace view shows the regenerate run
+under the message that won.
 
 ## Keeping a group task moving
 
@@ -177,11 +177,10 @@ Three agents in `#general`, then:
 All three answer "10 @everyone" at once. One is accepted; the other two lose
 the race and regenerate with 9. Each accepted number wakes everyone again, so
 every step is a race, and the losers keep regenerating from what won: 8, 7, …
-1, then `[no reply]` all round. The channel shows just the countdown; open the
-trace on the prompt to see ⇄ *"AgentB's reply "10 @everyone" was not posted,
-but AgentA got there first with "10 @everyone" (#5). AgentB will re-read and
-regenerate."*, the Decisions section shows the `sync` rows, and the run cards
-show "lost race" and "regenerate".
+1, then `[no reply]` all round. The channel and the trace show just the
+countdown; the Decisions section shows the `sync` rows (*"Lost the race:
+AgentA posted #5 after this agent's last read (#4)"*), and the run cards show
+"lost race" and "regenerate".
 
 ## Limitations
 

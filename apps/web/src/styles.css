@@ -2015,11 +2015,6 @@ textarea {
   background: var(--amber-soft);
   color: var(--amber);
 }
-.msg-conflict {
-  background: var(--amber-soft);
-  border-color: #ecd9a8;
-  color: #7a5410;
-}
 .decision-conflict {
   border-left: 3px solid var(--amber);
 }

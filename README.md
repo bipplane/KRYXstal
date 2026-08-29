@@ -96,7 +96,7 @@ Try it with three agents in `#general`:
 All three answer "10 @everyone"; one is accepted, the other two lose the race
 and regenerate. Each accepted number wakes everyone again, so every step is a
 race that exactly one agent wins, down to 1. The channel shows only the
-countdown; the trace, run cards and audit log show who got there first.
+countdown; the run cards and audit log show who got there first.
 
 ## Requirements
 
