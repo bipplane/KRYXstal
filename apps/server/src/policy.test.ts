@@ -3,6 +3,7 @@ import {
   deriveSessionPolicy,
   evaluate,
   grantChannels,
+  grantOverride,
   mapToolCall,
   matchResource,
   mayEver,
@@ -89,6 +90,19 @@ describe("Delegation", () => {
       ok: false,
       reason: expect.stringContaining("channel:post"),
     });
+  });
+});
+
+describe("Human grants override denies", () => {
+  it("lifts the matching deny and appends the allow", () => {
+    const worker = presetPolicy("worker");
+    const net = grantOverride(worker, "net:access", "*");
+    expect(evaluate(net, "net:access", "web").effect).toBe("allow");
+    expect(net.preset).toBe("custom");
+    const push = grantOverride(worker, "shell:exec", "cmd:git push");
+    expect(evaluate(push, "shell:exec", "cmd:git push origin main").effect).toBe("allow");
+    expect(evaluate(push, "shell:exec", "cmd:rm -rf /").effect).toBe("deny");
+    expect(evaluate(push, "shell:exec", "cmd:sudo ls").effect).toBe("deny");
   });
 });
 

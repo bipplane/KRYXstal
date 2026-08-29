@@ -2287,3 +2287,58 @@ textarea {
   color: var(--muted);
   opacity: 0.7;
 }
+
+/* approval cards: never squeeze in narrow panes (DMs, trace) */
+.approval-card {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+.approval-head {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+.approval-head .msg-time {
+  margin-left: auto;
+}
+.approval-body {
+  min-width: 0;
+}
+.approval-body .msg-text,
+.approval-body .msg-code,
+.approval-line,
+.approval-facts dd {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.approval-facts {
+  grid-template-columns: minmax(56px, 80px) minmax(0, 1fr);
+}
+.approval-facts code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.approval-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+@media (max-width: 1280px) {
+  .approval-facts {
+    grid-template-columns: 1fr;
+    gap: 2px 0;
+  }
+  .approval-facts dt {
+    margin-top: 6px;
+  }
+}
+
+/* rows in the scrolling message list must never be flex-shrunk (the approval
+   card has overflow:hidden, which otherwise lets it collapse to a sliver) */
+.message-list > * {
+  flex-shrink: 0;
+}
+.approval-card {
+  flex-shrink: 0;
+}

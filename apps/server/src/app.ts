@@ -45,7 +45,14 @@ const createChannelBody = z.object({
   description: z.string().max(500).optional(),
   memberIds: z.array(z.string()).max(100).optional(),
 });
-const approvalBody = z.object({ decision: z.enum(["approve", "deny"]) });
+const approvalBody = z.object({
+  decision: z.enum(["approve", "deny", "allow_once", "allow_forever"]),
+});
+const capabilityBody = z.object({
+  action: z.string().trim().min(3).max(120).regex(/^[a-z][a-z0-9_-]*:[A-Za-z0-9_*:.-]+$/, "action must look like shell:exec or mcp:server:tool"),
+  resource: z.string().trim().min(1).max(500).optional(),
+  reason: z.string().trim().min(1).max(2_000),
+});
 const messagesQuery = z.object({
   limit: z.coerce.number().int().min(1).max(500).default(200),
   after: z.string().optional(),
@@ -343,6 +350,16 @@ export async function createApp(
     const body = closeBody.parse(request.body);
     const closed = await service.agentClose(identity, body.agentId);
     return { agent: { id: closed.id, name: closed.name, status: closed.status } };
+  });
+
+  app.post("/api/agent/requests/capability", async (request, reply) => {
+    const identity = identityOf(request);
+    const body = capabilityBody.parse(request.body);
+    const approval = await service.agentRequestCapability(identity, body);
+    return reply.code(201).send({
+      approval: { id: approval.id, status: approval.status },
+      note: "Posted in your working channel. End your turn; you will be woken with the decision (allow once, allow forever, or deny).",
+    });
   });
 
   app.post("/api/agent/requests", async (request, reply) => {

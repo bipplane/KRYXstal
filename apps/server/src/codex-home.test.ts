@@ -47,7 +47,7 @@ const agent = (preset: "reader" | "worker" | "deployer" | "admin"): Agent => ({
 
 describe("Per-agent $CODEX_HOME", () => {
   it("exposes only the MCP tools the policy can ever grant", () => {
-    expect(enabledMcpTools(agent("reader"))).toEqual(["list_channels", "read_channel"]);
+    expect(enabledMcpTools(agent("reader"))).toEqual(["list_channels", "read_channel", "request_capability"]);
     expect(enabledMcpTools(agent("worker"))).toEqual([
       "list_channels",
       "read_channel",
@@ -55,6 +55,7 @@ describe("Per-agent $CODEX_HOME", () => {
       "spawn_agent",
       "close_agent",
       "request_principal",
+      "request_capability",
     ]);
     expect(enabledMcpTools(agent("admin"))).toContain("create_channel");
   });

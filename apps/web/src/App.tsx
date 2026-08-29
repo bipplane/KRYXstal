@@ -8,7 +8,8 @@ import IntegrationsPanel from "./components/IntegrationsPanel";
 import Sidebar from "./components/Sidebar";
 import TraceView from "./components/TraceView";
 import { Spinner } from "./components/ui";
-import type { Agent, AgentInput, Channel, Overview, PolicyPresets, SystemInfo } from "./types";
+import type {
+  ApprovalDecision, Agent, AgentInput, Channel, Overview, PolicyPresets, SystemInfo } from "./types";
 
 const TOKEN_KEY = "launchpad-token";
 const OVERVIEW_POLL_MS = 2000;
@@ -269,7 +270,7 @@ export default function App() {
   );
 
   const resolveApproval = useCallback(
-    async (approvalId: string, decision: "approve" | "deny") => {
+    async (approvalId: string, decision: ApprovalDecision) => {
       await api.resolveApproval(approvalId, decision);
       await refreshOverview();
     },

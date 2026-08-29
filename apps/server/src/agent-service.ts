@@ -14,7 +14,10 @@ import {
   deriveSessionPolicy,
   evaluate,
   grantChannels,
+  grantOverride,
   mapToolCall,
+  matchAction,
+  matchResource,
   normalizePolicy,
   presetPolicy,
   PRESETS,
@@ -26,8 +29,10 @@ import type {
   AgentInput,
   AgentRun,
   AgentRunner,
+  ApprovalDecision,
   ApprovalPayload,
   ApprovalRequest,
+  CapabilityGrant,
   Channel,
   ChannelMessage,
   Database,
@@ -69,6 +74,12 @@ export interface SpawnInput {
   actions?: string[] | undefined;
   channels?: string[] | undefined;
   task?: string | undefined;
+}
+
+export interface RequestCapabilityInput {
+  action: string;
+  resource?: string | undefined;
+  reason: string;
 }
 
 export interface RequestPrincipalInput {
@@ -143,7 +154,16 @@ export class AgentService {
       }
       for (const decision of database.decisions) decision.traceId ??= null;
       database.integrations ??= [];
+      database.grants ??= [];
       for (const agent of database.agents) agent.ownIntegrationIds ??= [];
+      for (const approval of database.approvals) {
+        approval.kind ??= "create_principal";
+        approval.capability ??= null;
+        approval.resolution ??= null;
+        approval.channelId ??= null;
+      }
+      // One-run grants never survive a restart (their run was cancelled above).
+      database.grants = database.grants.filter((grant) => grant.runId === null);
       this.ensureSystemChannels(database);
       for (const agent of database.agents) {
         if (!agent.dmChannelId) {
@@ -636,7 +656,7 @@ export class AgentService {
     const agent = this.getAgent(identity.agentId);
     const mapping = mapToolCall(toolName, toolInput);
     if (!mapping) return { effect: "allow", reason: "No authorisation required", action: null, resource: null };
-    const verdict = this.decide(agent, mapping.action, mapping.resource);
+    const verdict = this.decide(agent, mapping.action, mapping.resource, identity.runId);
     await this.recordDecision({
       agentId: agent.id,
       agentName: agent.name,
@@ -654,8 +674,27 @@ export class AgentService {
     return { ...verdict, action: mapping.action, resource: mapping.resource };
   }
 
+  /** The agent's policy plus any "allow once" grants bound to the given run. */
+  effectivePolicy(agent: Agent, runId: string | null): Policy {
+    const grants = this.store
+      .peek()
+      .grants.filter((grant) => grant.agentId === agent.id && runId !== null && grant.runId === runId);
+    if (grants.length === 0) return agent.policy;
+    // Same semantics as "allow forever", but only for this run: lift the covering deny
+    // (so no execpolicy rule is generated for it) and add the allow.
+    return grants.reduce(
+      (policy, grant) => grantOverride(policy, grant.action, grant.resource),
+      agent.policy,
+    );
+  }
+
   /** Policy + channel membership in one place. */
-  private decide(agent: Agent, action: string, resource: string): { effect: Effect; reason: string } {
+  private decide(
+    agent: Agent,
+    action: string,
+    resource: string,
+    runId: string | null = null,
+  ): { effect: Effect; reason: string } {
     if (agent.status === "closed") return { effect: "deny", reason: "Session is closed" };
     if (resource.startsWith("channel:") && resource !== "channel:*") {
       const name = resource.slice("channel:".length);
@@ -667,6 +706,17 @@ export class AgentService {
         return { effect: "deny", reason: agent.name + " is not a member of #" + name };
       }
     }
+    const grantHit = this.store
+      .peek()
+      .grants.some(
+        (grant) =>
+          grant.agentId === agent.id &&
+          runId !== null &&
+          grant.runId === runId &&
+          matchAction(grant.action, action) &&
+          matchResource(grant.resource, resource),
+      );
+    if (grantHit) return { effect: "allow", reason: "Allowed once by the human for this run" };
     const evaluation = evaluate(agent.policy, action, resource);
     return { effect: evaluation.effect, reason: evaluation.reason };
   }
@@ -679,7 +729,7 @@ export class AgentService {
     resource: string,
     source: Decision["source"] = "api",
   ): Promise<void> {
-    const verdict = this.decide(agent, action, resource);
+    const verdict = this.decide(agent, action, resource, runId);
     await this.recordDecision({
       agentId: agent.id,
       agentName: agent.name,
@@ -964,6 +1014,9 @@ export class AgentService {
         requesterId: requester.id,
         requesterName: requester.name,
         kind: "create_principal",
+        capability: null,
+        resolution: null,
+        channelId: approvals.id,
         payload,
         status: "pending",
         channelMessageId: null,
@@ -993,12 +1046,78 @@ export class AgentService {
     });
   }
 
-  async resolveApproval(id: string, decision: "approve" | "deny"): Promise<ApprovalRequest> {
+  /** An agent asks the human, in its working channel, for a capability its policy lacks. */
+  async agentRequestCapability(
+    identity: RunIdentity,
+    input: RequestCapabilityInput,
+  ): Promise<ApprovalRequest> {
+    const requester = this.getAgent(identity.agentId);
+    await this.authorize(requester, identity.runId, "request_capability", "capability:request", "*");
+    const run = this.store.peek().runs.find((item) => item.id === identity.runId);
+    const channelId = run?.replyChannelId ?? run?.channelId ?? requester.dmChannelId;
+    if (!channelId) throw new HttpError(409, "No channel to post the request in");
+    const capability = {
+      action: input.action.trim(),
+      resource: input.resource?.trim() || "*",
+      reason: input.reason.trim(),
+    };
+    if (evaluate(requester.policy, capability.action, capability.resource).effect === "allow") {
+      throw new HttpError(409, "Your policy already allows " + capability.action + " on " + capability.resource);
+    }
+    return this.store.mutate((database) => {
+      const approval: ApprovalRequest = {
+        id: randomUUID(),
+        requesterId: requester.id,
+        requesterName: requester.name,
+        kind: "capability",
+        capability,
+        resolution: null,
+        channelId,
+        payload: null,
+        status: "pending",
+        channelMessageId: null,
+        createdAt: now(),
+        resolvedAt: null,
+      };
+      const card = {
+        authorId: requester.id,
+        authorName: requester.name,
+        authorKind: requester.kind,
+        kind: "approval" as const,
+        content:
+          requester.name +
+          " requests " +
+          capability.action +
+          " on " +
+          capability.resource +
+          ": " +
+          capability.reason,
+        runId: identity.runId,
+        approvalId: approval.id,
+        ...this.traceOfRun(identity.runId),
+      };
+      const message = this.appendMessage(database, channelId, card);
+      approval.channelMessageId = message.id;
+      const approvals = database.channels.find((channel) => channel.name === APPROVALS_CHANNEL);
+      if (approvals && approvals.id !== channelId) {
+        this.appendMessage(database, approvals.id, {
+          ...card,
+          content: card.content + " (in #" + (database.channels.find((c) => c.id === channelId)?.name ?? "?") + ")",
+        });
+      }
+      database.approvals.push(approval);
+      return structuredClone(approval);
+    });
+  }
+
+  async resolveApproval(id: string, decision: ApprovalDecision): Promise<ApprovalRequest> {
     const approval = this.store.peek().approvals.find((item) => item.id === id);
     if (!approval) throw new HttpError(404, "Approval not found");
     if (approval.status !== "pending") throw new HttpError(409, "Approval already resolved");
+    if (approval.kind === "capability") return this.resolveCapability(approval, decision);
+    if (!approval.payload) throw new HttpError(500, "Approval has no payload");
     let created: Agent | null = null;
-    if (decision === "approve") {
+    if (decision !== "deny") {
       created = await this.createAgent({
         name: approval.payload.name,
         description: approval.payload.description,
@@ -1014,13 +1133,14 @@ export class AgentService {
     const resolved = await this.store.mutate((database) => {
       const stored = database.approvals.find((item) => item.id === id);
       if (!stored) throw new HttpError(404, "Approval not found");
-      stored.status = decision === "approve" ? "approved" : "denied";
+      stored.status = decision === "deny" ? "denied" : "approved";
       stored.resolvedAt = now();
       const approvals = database.channels.find((channel) => channel.name === APPROVALS_CHANNEL);
+      const requestedName = stored.payload?.name ?? "agent";
       const text =
-        decision === "approve"
-          ? "Approved: created principal " + (created?.name ?? stored.payload.name)
-          : "Denied: request for principal " + stored.payload.name;
+        decision !== "deny"
+          ? "Approved: created principal " + (created?.name ?? requestedName)
+          : "Denied: request for principal " + requestedName;
       for (const channelId of new Set([approvals?.id, requester?.dmChannelId])) {
         if (!channelId) continue;
         this.appendMessage(database, channelId, {
@@ -1041,6 +1161,96 @@ export class AgentService {
       const messages = this.getMessages(requester.dmChannelId, 1);
       const last = messages.at(-1);
       if (last) await this.wakeMembers(requester.dmChannelId, last, true);
+    }
+    return resolved;
+  }
+
+  private async resolveCapability(
+    approval: ApprovalRequest,
+    decision: ApprovalDecision,
+  ): Promise<ApprovalRequest> {
+    const capability = approval.capability;
+    if (!capability) throw new HttpError(500, "Capability request has no payload");
+    if (decision === "approve") decision = "allow_once";
+    const requester = this.store.peek().agents.find((agent) => agent.id === approval.requesterId);
+    const channelId = approval.channelId ?? requester?.dmChannelId ?? null;
+    const requestMessage = this.store
+      .peek()
+      .messages.find((item) => item.id === approval.channelMessageId);
+    const resolved = await this.store.mutate((database) => {
+      const stored = database.approvals.find((item) => item.id === approval.id);
+      if (!stored) throw new HttpError(404, "Approval not found");
+      const agent = database.agents.find((item) => item.id === approval.requesterId);
+      stored.status = decision === "deny" ? "denied" : "approved";
+      stored.resolution = decision === "allow_forever" ? "forever" : decision === "allow_once" ? "once" : null;
+      stored.resolvedAt = now();
+      if (agent && decision === "allow_forever") {
+        agent.policy = grantOverride(agent.policy, capability.action, capability.resource);
+        agent.updatedAt = now();
+      }
+      if (agent && decision === "allow_once") {
+        const grant: CapabilityGrant = {
+          id: randomUUID(),
+          agentId: agent.id,
+          action: capability.action,
+          resource: capability.resource,
+          approvalId: stored.id,
+          runId: null,
+          createdAt: now(),
+        };
+        database.grants.push(grant);
+      }
+      const text =
+        decision === "deny"
+          ? "Denied: " + capability.action + " on " + capability.resource
+          : (decision === "allow_forever" ? "Allowed forever: " : "Allowed once (next turn): ") +
+            capability.action +
+            " on " +
+            capability.resource;
+      const approvalsChannel = database.channels.find((channel) => channel.name === APPROVALS_CHANNEL);
+      for (const target of new Set([channelId, approvalsChannel?.id])) {
+        if (!target) continue;
+        this.appendMessage(database, target, {
+          authorId: USER_ID,
+          authorName: this.config.userName,
+          authorKind: "user",
+          kind: "system",
+          content: text + (target !== channelId ? " (for " + approval.requesterName + ")" : ""),
+          runId: null,
+          approvalId: stored.id,
+          traceId: requestMessage?.traceId,
+          parentMessageId: requestMessage?.id ?? null,
+        });
+      }
+      return structuredClone(stored);
+    });
+    await this.recordDecision({
+      agentId: approval.requesterId,
+      agentName: approval.requesterName,
+      runId: null,
+      source: "api",
+      tool: "request_capability",
+      action: capability.action,
+      resource: capability.resource,
+      effect: decision === "deny" ? "deny" : "allow",
+      reason:
+        decision === "deny"
+          ? "Denied by the human"
+          : decision === "allow_forever"
+            ? "Granted by the human (policy updated)"
+            : "Granted by the human for one run",
+    });
+    if (requester && decision === "allow_forever") {
+      const updated = this.getAgent(requester.id);
+      await this.workspaces.writeInstructions(updated, this.instructionContext(updated));
+    }
+    // Wake the requester with the decision, replying where it was asked.
+    if (requester && channelId) {
+      const notice = this.getMessages(channelId, 1).at(-1);
+      if (notice) {
+        this.chatter.set(channelId, 0);
+        await this.queueTurn(requester.id, channelId, notice);
+      }
     }
     return resolved;
   }
@@ -1339,6 +1549,9 @@ export class AgentService {
       if (stored.status === "closed") throw new HttpError(409, "Session is closed");
       if (stored.status === "busy") throw new HttpError(409, "This Agent is already running");
       database.runs.push(run);
+      for (const grant of database.grants) {
+        if (grant.agentId === agent.id && grant.runId === null) grant.runId = run.id;
+      }
       const snapshot = structuredClone(stored);
       stored.status = "busy";
       stored.lastError = null;
@@ -1371,12 +1584,13 @@ export class AgentService {
     try {
       if (this.cancellationRequests.has(agentAtStart.id)) throw new RunCancelledError();
       const codexHome = agentCodexHome(this.config, agentAtStart.id);
+      const rendered: Agent = { ...agentAtStart, policy: this.effectivePolicy(agentAtStart, run.id) };
       await renderCodexHome({
         dir: codexHome,
         config: this.config,
-        agent: agentAtStart,
+        agent: rendered,
         scriptsDir: runtimeScriptsDirForCodex(this.config),
-        integrations: this.integrations?.forAgent(agentAtStart).map((entry) => ({
+        integrations: this.integrations?.forAgent(rendered).map((entry) => ({
           name: entry.integration.name,
           kind: entry.integration.kind,
           url: entry.integration.url,
@@ -1384,9 +1598,9 @@ export class AgentService {
           args: entry.integration.args,
           enabledTools: entry.enabledTools,
         })),
-        credentialsFile: (await this.integrations?.credentialsFor(agentAtStart)) ?? null,
+        credentialsFile: (await this.integrations?.credentialsFor(rendered)) ?? null,
       });
-      await this.workspaces.writeInstructions(agentAtStart, this.instructionContext(agentAtStart));
+      await this.workspaces.writeInstructions(rendered, this.instructionContext(rendered));
       const result = await this.runner.run({
         agentId: agentAtStart.id,
         runId: run.id,
@@ -1394,7 +1608,7 @@ export class AgentService {
         codexHome,
         prompt: run.prompt,
         threadId: agentAtStart.codexThreadId,
-        sandboxMode: effectiveSandboxMode(this.config, agentAtStart),
+        sandboxMode: effectiveSandboxMode(this.config, rendered),
         env: { AGENT_TOKEN: token, LAUNCHPAD_URL: this.config.agentApiBaseUrl },
         onEvent: (event) => {
           if (events.length < MAX_EVENTS_PER_RUN) events.push(event);
@@ -1465,6 +1679,11 @@ export class AgentService {
     } finally {
       this.revokeRunTokens(run.id);
       this.liveEvents.delete(run.id);
+      if (this.store.peek().grants.some((grant) => grant.runId === run.id)) {
+        await this.store.mutate((database) => {
+          database.grants = database.grants.filter((grant) => grant.runId !== run.id);
+        });
+      }
       await this.drainPendingWakes(agentAtStart.id);
     }
   }

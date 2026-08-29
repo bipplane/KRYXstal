@@ -1,4 +1,5 @@
 import type {
+  ApprovalDecision,
   Agent,
   AgentInput,
   AgentRun,
@@ -100,7 +101,7 @@ export const api = {
   createChannel: (body: { name: string; description: string; memberIds: string[] }) =>
     request<{ channel: Channel }>("/api/channels", json("POST", body)),
 
-  resolveApproval: (id: string, decision: "approve" | "deny") =>
+  resolveApproval: (id: string, decision: ApprovalDecision) =>
     request<{ approval: ApprovalRequest }>(
       "/api/approvals/" + encodeURIComponent(id),
       json("POST", { decision }),

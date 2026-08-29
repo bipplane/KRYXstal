@@ -123,6 +123,24 @@ const TOOLS = [
   },
 ];
 
+TOOLS.push({
+  name: "request_capability",
+  description:
+    "Ask the human for a capability your policy lacks (e.g. shell:exec on cmd:git push, net:access, mcp:linear:create_issue). " +
+    "The request is posted in the channel you are working in; end your turn after asking. You are woken with the decision: " +
+    "allow once (for your next turn), allow forever, or deny.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      action: { type: "string", description: "IAM action, e.g. shell:exec, net:access, mcp:<server>:<tool>" },
+      resource: { type: "string", description: "Resource pattern, e.g. cmd:git push, channel:deploys, or * (default)" },
+      reason: { type: "string", description: "Why you need it, in one or two sentences" },
+    },
+    required: ["action", "reason"],
+    additionalProperties: false,
+  },
+});
+
 const ROUTES = {
   list_channels: () => ["GET", "/api/agent/channels"],
   read_channel: (args) => [
@@ -142,6 +160,7 @@ const ROUTES = {
   spawn_agent: (args) => ["POST", "/api/agent/spawn", args],
   close_agent: (args) => ["POST", "/api/agent/close", { agentId: args.agent_id }],
   request_principal: (args) => ["POST", "/api/agent/requests", args],
+  request_capability: (args) => ["POST", "/api/agent/requests/capability", args],
 };
 
 async function callControlPlane(method, route, body) {

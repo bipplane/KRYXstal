@@ -21,6 +21,7 @@ export const PRESETS: Record<Exclude<Policy["preset"], "custom">, Policy> = {
         resources: ["cmd:rm -rf", "cmd:sudo", "cmd:git push", "cmd:curl", "cmd:wget"],
       },
       { effect: "deny", actions: ["fs:write", "net:access"], resources: ["*"] },
+      { effect: "allow", actions: ["capability:request"], resources: ["*"] },
     ],
     delegable: [],
   },
@@ -30,7 +31,7 @@ export const PRESETS: Record<Exclude<Policy["preset"], "custom">, Policy> = {
       { effect: "allow", actions: ["channel:read", "channel:post"], resources: ["channel:*"] },
       { effect: "allow", actions: ["shell:exec", "fs:write"], resources: ["*"] },
       { effect: "allow", actions: ["agent:spawn", "agent:close"], resources: ["*"] },
-      { effect: "allow", actions: ["principal:request"], resources: ["*"] },
+      { effect: "allow", actions: ["principal:request", "capability:request"], resources: ["*"] },
       {
         effect: "deny",
         actions: ["shell:exec"],
@@ -46,7 +47,7 @@ export const PRESETS: Record<Exclude<Policy["preset"], "custom">, Policy> = {
       { effect: "allow", actions: ["channel:read", "channel:post"], resources: ["channel:*"] },
       { effect: "allow", actions: ["shell:exec", "fs:write", "net:access"], resources: ["*"] },
       { effect: "allow", actions: ["agent:spawn", "agent:close"], resources: ["*"] },
-      { effect: "allow", actions: ["principal:request"], resources: ["*"] },
+      { effect: "allow", actions: ["principal:request", "capability:request"], resources: ["*"] },
       { effect: "deny", actions: ["shell:exec"], resources: ["cmd:rm -rf /", "cmd:sudo"] },
     ],
     delegable: ["channel:read", "channel:post", "shell:exec", "fs:write", "net:access"],
@@ -249,6 +250,31 @@ export function deriveSessionPolicy(
   };
 }
 
+/**
+ * Removes deny coverage of (action, resource) so a human grant can take effect
+ * ("deny wins" otherwise). A deny on `*` resources loses the action pattern; a
+ * deny on specific resources loses the matching resource pattern. Then appends
+ * the allow statement.
+ */
+export function grantOverride(policy: Policy, action: string, resource: string): Policy {
+  const next = structuredClone(policy);
+  next.statements = next.statements
+    .map((statement) => {
+      if (statement.effect !== "deny") return statement;
+      const actionHit = statement.actions.some((pattern) => matchAction(pattern, action));
+      const resourceHit = statement.resources.some((pattern) => matchResource(pattern, resource));
+      if (!actionHit || !resourceHit) return statement;
+      if (statement.resources.includes("*") || resource === "*") {
+        return { ...statement, actions: statement.actions.filter((pattern) => !matchAction(pattern, action)) };
+      }
+      return { ...statement, resources: statement.resources.filter((pattern) => !matchResource(pattern, resource)) };
+    })
+    .filter((statement) => statement.actions.length > 0 && statement.resources.length > 0);
+  next.statements.push({ effect: "allow", actions: [action], resources: [resource] });
+  next.preset = "custom";
+  return next;
+}
+
 /** Execpolicy rules for every `cmd:` deny so Codex blocks the command before the hook even runs. */
 export function renderExecPolicyRules(policy: Policy): string {
   const lines = [
@@ -350,6 +376,8 @@ export function mapToolCall(toolName: string, toolInput: unknown): ToolCallMappi
         return { action: "agent:close", resource: stringArgument(toolInput, ["agent_id"]) || "*" };
       case "request_principal":
         return { action: "principal:request", resource: "*" };
+      case "request_capability":
+        return { action: "capability:request", resource: "*" };
       default:
         return { action: "tool:launchpad:" + tool, resource: "*" };
     }

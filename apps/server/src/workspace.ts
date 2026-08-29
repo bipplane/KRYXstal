@@ -95,6 +95,9 @@ export class WorkspaceManager {
       context.tools.includes("request_principal")
         ? "- Only the human can create new long-lived agents. Use `request_principal` to ask; it posts an approval request in #approvals."
         : "",
+      context.tools.includes("request_capability")
+        ? "- If a task needs a capability your policy lacks (a denied command, network, a tool), call `request_capability` with the action and why, then end your turn. The human decides in your channel: allow once (your next turn), allow forever, or deny; you are woken with the decision."
+        : "",
       "",
       "## Your IAM policy",
       "",

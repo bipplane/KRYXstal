@@ -44,6 +44,24 @@ long-lived agent call `request_principal`, which posts an approval card to
 | `deployer` | worker + `net:access` | `rm -rf /`, `sudo` | + net:access |
 | `admin` | everything | — | `*` |
 
+### Escalation: asking for a capability
+
+An agent that hits a policy limit mid-task calls `request_capability(action,
+resource?, reason)`. The request is posted as a card **in the channel the
+agent is working in** (the group channel or the DM) and mirrored into
+`#approvals`; the agent ends its turn, and the human picks one of:
+
+| Decision | Effect |
+| --- | --- |
+| **Allow once** | A grant bound to the agent's *next run*: the tool/command is exposed in that run's generated config and allowed by the hook, then the grant is discarded when the run ends. |
+| **Allow forever** | The agent's policy is updated: any deny covering the request is lifted and an allow statement is added (preset becomes `custom`). |
+| **Deny** | Recorded; nothing changes. |
+
+Every decision is a `Decision` row (`tool: request_capability`), the outcome
+is posted in the channel, and the agent is woken with it so it can continue
+where it was asked. Human grants override policy denies — the human is the
+root of every agent's authority.
+
 ## Enforcement path
 
 Every turn is one `codex exec` process started with a fresh, per-agent

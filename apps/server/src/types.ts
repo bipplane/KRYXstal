@@ -16,6 +16,7 @@ export const ACTIONS = [
   "agent:spawn",
   "agent:close",
   "principal:request",
+  "capability:request",
 ] as const;
 export type Action = (typeof ACTIONS)[number];
 
@@ -154,12 +155,28 @@ export interface ApprovalPayload {
   channelIds: string[];
 }
 
+export type ApprovalKind = "create_principal" | "capability";
+/** `approve`/`deny` for principal requests; `allow_once`/`allow_forever`/`deny` for capability requests. */
+export type ApprovalDecision = "approve" | "deny" | "allow_once" | "allow_forever";
+
+export interface CapabilityPayload {
+  action: string;
+  resource: string;
+  reason: string;
+}
+
 export interface ApprovalRequest {
   id: string;
   requesterId: string;
   requesterName: string;
-  kind: "create_principal";
-  payload: ApprovalPayload;
+  kind: ApprovalKind;
+  /** Requested capability, for kind "capability". */
+  capability: CapabilityPayload | null;
+  /** How an approved capability request was granted. */
+  resolution: "once" | "forever" | null;
+  /** Channel the request was posted in (the requester's working channel for capabilities). */
+  channelId: string | null;
+  payload: ApprovalPayload | null;
   status: "pending" | "approved" | "denied";
   channelMessageId: string | null;
   createdAt: string;
@@ -177,10 +194,22 @@ export interface Trace {
   live: boolean;
 }
 
+/** A one-run grant created by "allow once"; bound to the requester's next run, dropped when it ends. */
+export interface CapabilityGrant {
+  id: string;
+  agentId: string;
+  action: string;
+  resource: string;
+  approvalId: string;
+  runId: string | null;
+  createdAt: string;
+}
+
 export interface Database {
   version: 2;
   agents: Agent[];
   integrations: Integration[];
+  grants: CapabilityGrant[];
   channels: Channel[];
   messages: ChannelMessage[];
   runs: AgentRun[];

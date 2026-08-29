@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentService, mentions } from "./agent-service.js";
 import { loadConfig } from "./config.js";
-import { presetPolicy } from "./policy.js";
+import { evaluate, presetPolicy, renderExecPolicyRules } from "./policy.js";
 import { JsonStore } from "./store.js";
 import type { AgentRunner, RunIdentity, RunnerRequest, RunnerResult } from "./types.js";
 import { WorkspaceManager } from "./workspace.js";
@@ -468,5 +468,116 @@ describe("Reply routing", () => {
     expect(report?.channelId).toBe(asker.dmChannelId);
     expect(trace.runs[2]?.replyChannelId).toBe(asker.dmChannelId);
     expect(second?.prompt).toContain("where you were originally asked");
+  });
+});
+
+describe("Effective policy", () => {
+  it("lifts denies covered by a once-grant for the bound run only", async () => {
+    const { service } = await makeService();
+    const agent = await service.createAgent({ name: "Worker" });
+    const store = (service as unknown as { store: JsonStore }).store;
+    await store.mutate((database) =>
+      database.grants.push({
+        id: "g1",
+        agentId: agent.id,
+        action: "shell:exec",
+        resource: "cmd:curl",
+        approvalId: "a1",
+        runId: "run-1",
+        createdAt: new Date().toISOString(),
+      }),
+    );
+    const bound = service.effectivePolicy(service.getAgent(agent.id), "run-1");
+    expect(evaluate(bound, "shell:exec", "cmd:curl https://x").effect).toBe("allow");
+    expect(renderExecPolicyRules(bound)).not.toContain('"curl"');
+    const other = service.effectivePolicy(service.getAgent(agent.id), "run-2");
+    expect(evaluate(other, "shell:exec", "cmd:curl https://x").effect).toBe("deny");
+    expect(renderExecPolicyRules(other)).toContain('"curl"');
+  });
+});
+
+describe("Capability requests", () => {
+  it("posts the request in the working channel and grants once, forever, or denies", async () => {
+    let service!: AgentService;
+    let phase: "ask" | "use" = "ask";
+    const seen: Array<{ effect: string; action: string }> = [];
+    const runner: AgentRunner = {
+      run: async (request) => {
+        const id = { agentId: request.agentId, runId: request.runId, expiresAt: Date.now() + 60_000 };
+        if (phase === "ask") {
+          await service.agentRequestCapability(id, { action: "net:access", reason: "need to fetch docs" });
+          return { output: "Asked for network access.", threadId: "t", usage: null };
+        }
+        const verdict = await service.evaluateToolCall(id, "web_search", { query: "x" });
+        seen.push({ effect: verdict.effect, action: verdict.action ?? "" });
+        return { output: "web search " + verdict.effect, threadId: "t", usage: null };
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    };
+    ({ service } = await makeService(runner));
+    const agent = await service.createAgent({ name: "Worker" });
+    const general = service.getChannelByName("general");
+    await service.postUserMessage(general.id, "@worker fetch the docs");
+    await expect.poll(() => service.overview().approvals.length).toBe(1);
+    const approval = service.overview().approvals[0];
+    expect(approval).toMatchObject({ kind: "capability", channelId: general.id, capability: { action: "net:access", resource: "*" } });
+    expect(service.getMessages(general.id).find((m) => m.approvalId === approval?.id)).toMatchObject({ kind: "approval" });
+    const approvalsChannel = service.getChannelByName("approvals");
+    expect(service.getMessages(approvalsChannel.id).find((m) => m.approvalId === approval?.id)).toMatchObject({
+      kind: "approval",
+      content: expect.stringContaining("(in #general)"),
+    });
+    await expect.poll(() => service.getAgent(agent.id).status).toBe("ready");
+
+    // Allow once: the grant is bound to the wake-up run and the hook allows there; it is gone afterwards.
+    phase = "use";
+    await service.resolveApproval(approval?.id ?? "", "allow_once");
+    await expect.poll(() => seen.length).toBe(1);
+    expect(seen[0]).toEqual({ effect: "allow", action: "net:access" });
+    await expect.poll(() => service.getRuns(agent.id)[0]?.status).toBe("completed");
+    expect(service.getAgent(agent.id).policy.statements.some((s) => s.actions.includes("net:access") && s.effect === "allow")).toBe(false);
+    const runs = service.getRuns(agent.id);
+    expect(runs[0]?.channelId).toBe(general.id);
+    expect(service.getMessages(general.id).some((m) => m.kind === "system" && m.content.startsWith("Allowed once"))).toBe(true);
+    expect(service.getMessages(approvalsChannel.id).some((m) => m.kind === "system" && m.content.startsWith("Allowed once"))).toBe(true);
+    // A later run without the grant is denied again.
+    await service.postUserMessage(general.id, "@worker try again");
+    await expect.poll(() => seen.length).toBe(2);
+    expect(seen[1]?.effect).toBe("deny");
+
+    // Allow forever: policy updated, later runs allowed.
+    phase = "ask";
+    await service.postUserMessage(general.id, "@worker fetch it once more");
+    await expect.poll(() => service.overview().approvals.length).toBe(1);
+    phase = "use";
+    await service.resolveApproval(service.overview().approvals[0]?.id ?? "", "allow_forever");
+    await expect.poll(() => seen.length).toBe(3);
+    expect(seen[2]?.effect).toBe("allow");
+    const updated = service.getAgent(agent.id).policy;
+    expect(updated.statements.at(-1)).toEqual({ effect: "allow", actions: ["net:access"], resources: ["*"] });
+    expect(updated.statements.some((s) => s.effect === "deny" && s.actions.includes("net:access"))).toBe(false);
+    expect(evaluate(updated, "net:access", "web").effect).toBe("allow");
+    expect(service.getDecisions(agent.id).find((d) => d.tool === "request_capability")).toMatchObject({
+      effect: "allow",
+      reason: expect.stringContaining("policy updated"),
+    });
+
+    // Already-allowed requests are rejected; deny records a decision.
+    const denyAgent = await service.createAgent({ name: "Other" });
+    await expect(
+      service.agentRequestCapability(
+        { agentId: denyAgent.id, runId: "r", expiresAt: Date.now() + 1000 },
+        { action: "shell:exec", reason: "x" },
+      ),
+    ).rejects.toMatchObject({ statusCode: 409 });
+    const req = await service.agentRequestCapability(
+      { agentId: denyAgent.id, runId: "r", expiresAt: Date.now() + 1000 },
+      { action: "shell:exec", resource: "cmd:git push", reason: "ship it" },
+    );
+    expect(req.channelId).toBe(denyAgent.dmChannelId);
+    const denied = await service.resolveApproval(req.id, "deny");
+    expect(denied.status).toBe("denied");
+    expect(service.getDecisions(denyAgent.id)[0]).toMatchObject({ effect: "deny", action: "shell:exec", resource: "cmd:git push" });
   });
 });

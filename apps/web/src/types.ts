@@ -17,6 +17,7 @@ export const ACTIONS = [
   "agent:spawn",
   "agent:close",
   "principal:request",
+  "capability:request",
 ] as const;
 export type Action = (typeof ACTIONS)[number];
 
@@ -151,18 +152,35 @@ export interface AgentRun {
   createdAt: string;
 }
 
+export type ApprovalKind = "create_principal" | "capability";
+/** `approve`/`deny` for principal requests; `allow_once`/`allow_forever`/`deny` for capability requests. */
+export type ApprovalDecision = "approve" | "deny" | "allow_once" | "allow_forever";
+
+export interface CapabilityPayload {
+  action: string;
+  resource: string;
+  reason: string;
+}
+
 export interface ApprovalRequest {
   id: string;
   requesterId: string;
   requesterName: string;
-  kind: "create_principal";
+  kind: ApprovalKind;
+  /** Requested capability, for kind "capability". */
+  capability: CapabilityPayload | null;
+  /** How an approved capability request was granted. */
+  resolution: "once" | "forever" | null;
+  /** Channel the request was posted in (the requester's working channel for capabilities). */
+  channelId: string | null;
+  /** New-principal request, for kind "create_principal"; null for capability requests. */
   payload: {
     name: string;
     description: string;
     instructions: string;
     policy: Policy;
     channelIds: string[];
-  };
+  } | null;
   status: "pending" | "approved" | "denied";
   channelMessageId: string | null;
   createdAt: string;

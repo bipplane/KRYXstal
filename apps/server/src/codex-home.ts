@@ -15,6 +15,7 @@ export const MCP_TOOL_ACTIONS: Record<string, string> = {
   spawn_agent: "agent:spawn",
   close_agent: "agent:close",
   request_principal: "principal:request",
+  request_capability: "capability:request",
 };
 
 export interface ExternalMcpServer {

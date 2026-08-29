@@ -7,6 +7,7 @@ const emptyDatabase = (): Database => ({
   version: 2,
   agents: [],
   integrations: [],
+  grants: [],
   channels: [],
   messages: [],
   runs: [],
