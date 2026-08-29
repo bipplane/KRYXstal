@@ -10,6 +10,7 @@ interface SidebarProps {
   onSelectAgent: (agent: Agent) => void;
   onNewAgent: () => void;
   onNewChannel: () => void;
+  onOpenIntegrations: () => void;
 }
 
 export default function Sidebar({
@@ -21,9 +22,11 @@ export default function Sidebar({
   onSelectAgent,
   onNewAgent,
   onNewChannel,
+  onOpenIntegrations,
 }: SidebarProps) {
   const channels = (overview?.channels ?? []).filter((c) => c.kind !== "dm" && !c.archivedAt);
   const agents = overview?.agents ?? [];
+  const integrations = overview?.integrations ?? [];
   const principals = agents.filter((a) => a.kind === "principal");
   const sessionsByParent = new Map<string, Agent[]>();
   for (const agent of agents) {
@@ -117,6 +120,35 @@ export default function Sidebar({
                 ...(sessionsByParent.get(principal.id) ?? []).map((session) => renderAgent(session, true)),
               ])}
               {orphanSessions.map((session) => renderAgent(session, true))}
+            </ul>
+          )}
+        </div>
+
+        <div className="nav-group">
+          <div className="nav-group-head">
+            <span>Integrations</span>
+            <button type="button" className="link-btn" onClick={onOpenIntegrations}>
+              {integrations.length === 0 ? "+ Add" : "Manage"}
+            </button>
+          </div>
+          {integrations.length === 0 ? (
+            <div className="nav-empty">No MCP servers connected yet.</div>
+          ) : (
+            <ul className="nav-list">
+              {integrations.map((integration) => (
+                <li key={integration.id}>
+                  <button
+                    type="button"
+                    className="nav-item integ-nav"
+                    onClick={onOpenIntegrations}
+                    title={integration.status + (integration.lastError ? ": " + integration.lastError : "")}
+                  >
+                    <span className={"integ-dot integ-dot-" + integration.status} />
+                    <span className="nav-label">{integration.name}</span>
+                    <span className="muted small">{integration.tools.length}</span>
+                  </button>
+                </li>
+              ))}
             </ul>
           )}
         </div>

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { api, ApiError } from "../api";
-import type { Agent, ApprovalRequest, Channel, ChannelMessage, Overview } from "../types";
+import type {
+  ApprovalDecision, Agent, ApprovalRequest, Channel, ChannelMessage, Overview } from "../types";
 import { Avatar, clockTime, EmptyState, ErrorNote, fullTime, MessageContent, Spinner, Tag, useNow } from "./ui";
 
 interface ChannelViewProps {
@@ -9,7 +10,7 @@ interface ChannelViewProps {
   onSelectAgent: (agentId: string) => void;
   onOpenRun: (agentId: string, runId: string) => void;
   onOpenTrace: (messageId: string) => void;
-  onResolveApproval: (approvalId: string, decision: "approve" | "deny") => Promise<void>;
+  onResolveApproval: (approvalId: string, decision: ApprovalDecision) => Promise<void>;
 }
 
 const POLL_MS = 1500;
@@ -223,7 +224,7 @@ interface MessageRowProps {
   onSelectAgent: (agentId: string) => void;
   onOpenRun: (agentId: string, runId: string) => void;
   onOpenTrace: (messageId: string) => void;
-  onResolveApproval: (approvalId: string, decision: "approve" | "deny") => Promise<void>;
+  onResolveApproval: (approvalId: string, decision: ApprovalDecision) => Promise<void>;
 }
 
 function MessageRow({
@@ -406,14 +407,15 @@ function ApprovalCard({
   time: ReactNode;
   traceButton: ReactNode;
   onSelectAgent: (agentId: string) => void;
-  onResolveApproval: (approvalId: string, decision: "approve" | "deny") => Promise<void>;
+  onResolveApproval: (approvalId: string, decision: ApprovalDecision) => Promise<void>;
 }) {
-  const [busy, setBusy] = useState<"approve" | "deny" | null>(null);
+  const [busy, setBusy] = useState<ApprovalDecision | null>(null);
   const [error, setError] = useState<string | null>(null);
   const pending = approval !== null && approval.status === "pending";
   const statusLabel = approval ? approval.status : "resolved";
+  const isCapability = approval?.kind === "capability" || (!approval && / requests [a-z]+:/.test(message.content));
 
-  const decide = async (decision: "approve" | "deny") => {
+  const decide = async (decision: ApprovalDecision) => {
     if (!message.approvalId) return;
     setBusy(decision);
     setError(null);
@@ -426,7 +428,7 @@ function ApprovalCard({
     }
   };
 
-  const channelNames = approval
+  const channelNames = approval?.payload
     ? approval.payload.channelIds.map((id) => {
         const channel = (overview?.channels ?? []).find((c) => c.id === id);
         return channel ? "#" + channel.name : id;
@@ -438,8 +440,8 @@ function ApprovalCard({
   return (
     <div className={"approval-card" + (pending ? "" : " approval-card-resolved")}>
       <div className="approval-head">
-        <span className="msg-glyph">✋</span>
-        <span className="approval-title">Approval requested</span>
+        <span className="msg-glyph">{isCapability ? "🔑" : "✋"}</span>
+        <span className="approval-title">{isCapability ? "Capability requested" : "Approval requested"}</span>
         <span className={"approval-status approval-status-" + statusLabel}>{statusLabel}</span>
         {time}
         {traceButton}
@@ -451,9 +453,21 @@ function ApprovalCard({
           ) : (
             <span className="msg-author">{message.authorName}</span>
           )}
-          <span className="muted"> wants to create a new principal</span>
+          <span className="muted">{isCapability ? " asks for a capability" : " wants to create a new principal"}</span>
         </div>
-        {approval ? (
+        {approval?.capability ? (
+          <dl className="approval-facts">
+            <dt>Action</dt>
+            <dd>
+              <code>{approval.capability.action}</code>
+              <span className="muted"> on </span>
+              <code>{approval.capability.resource}</code>
+            </dd>
+            <dt>Why</dt>
+            <dd>{approval.capability.reason}</dd>
+          </dl>
+        ) : null}
+        {approval?.payload ? (
           <dl className="approval-facts">
             <dt>Name</dt>
             <dd>{approval.payload.name}</dd>
@@ -476,9 +490,38 @@ function ApprovalCard({
             <dd>{channelNames.length > 0 ? channelNames.join(", ") : <span className="muted">none</span>}</dd>
           </dl>
         ) : null}
-        {message.content ? <MessageContent content={message.content} /> : null}
+        {message.content && !approval?.capability ? <MessageContent content={message.content} /> : null}
         <ErrorNote message={error} />
-        {pending ? (
+        {pending && isCapability ? (
+          <div className="approval-actions">
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              disabled={busy !== null}
+              onClick={() => void decide("allow_once")}
+              title="Grant it for the agent's next turn only"
+            >
+              {busy === "allow_once" ? "Allowing…" : "Allow once"}
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm"
+              disabled={busy !== null}
+              onClick={() => void decide("allow_forever")}
+              title="Add it to the agent's policy"
+            >
+              {busy === "allow_forever" ? "Allowing…" : "Allow forever"}
+            </button>
+            <button
+              type="button"
+              className="btn btn-danger btn-sm"
+              disabled={busy !== null}
+              onClick={() => void decide("deny")}
+            >
+              {busy === "deny" ? "Denying…" : "Deny"}
+            </button>
+          </div>
+        ) : pending ? (
           <div className="approval-actions">
             <button
               type="button"

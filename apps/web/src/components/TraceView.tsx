@@ -758,7 +758,13 @@ function MessageItem({
             <AuthorName message={message} onSelectAgent={onSelectAgent} />
             <span className="muted">
               {" "}
-              wants to create {approval ? <strong>{approval.payload.name}</strong> : "a new principal"}
+              {approval?.capability ? (
+                <>
+                  asks for <code>{approval.capability.action}</code> on <code>{approval.capability.resource}</code>
+                </>
+              ) : (
+                <>wants to create {approval?.payload ? <strong>{approval.payload.name}</strong> : "a new principal"}</>
+              )}
             </span>
           </div>
           {message.content ? <LongContent content={message.content} /> : null}

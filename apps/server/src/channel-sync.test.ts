@@ -48,6 +48,7 @@ async function makeService(
     new JsonStore(path.join(root, "data", "db.json")),
     new WorkspaceManager(path.join(root, "workspaces")),
     runner,
+    null,
     sync,
   );
   await service.initialize();

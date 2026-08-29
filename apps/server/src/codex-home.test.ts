@@ -47,7 +47,7 @@ const agent = (preset: "reader" | "worker" | "deployer" | "admin"): Agent => ({
 
 describe("Per-agent $CODEX_HOME", () => {
   it("exposes only the MCP tools the policy can ever grant", () => {
-    expect(enabledMcpTools(agent("reader"))).toEqual(["list_channels", "read_channel"]);
+    expect(enabledMcpTools(agent("reader"))).toEqual(["list_channels", "read_channel", "request_capability"]);
     expect(enabledMcpTools(agent("worker"))).toEqual([
       "list_channels",
       "read_channel",
@@ -55,6 +55,7 @@ describe("Per-agent $CODEX_HOME", () => {
       "spawn_agent",
       "close_agent",
       "request_principal",
+      "request_capability",
     ]);
     expect(enabledMcpTools(agent("admin"))).toContain("create_channel");
   });
@@ -102,6 +103,23 @@ describe("Per-agent $CODEX_HOME", () => {
     await expect(
       renderCodexHome({ dir, config: missing, agent: agent("worker"), scriptsDir: "/o" }),
     ).rejects.toThrow("codex login");
+  });
+
+  it("renders external MCP servers with per-agent tool allowlists", () => {
+    const toml = renderConfigToml({
+      dir: "/x",
+      config,
+      agent: agent("worker"),
+      scriptsDir: "/o",
+      integrations: [
+        { name: "linear", kind: "http", url: "https://mcp.linear.app/mcp", command: null, args: [], enabledTools: ["list_issues"] },
+        { name: "local", kind: "stdio", url: null, command: "node", args: ["srv.mjs"], enabledTools: null },
+      ],
+    });
+    expect(toml.startsWith('mcp_oauth_credentials_store = "file"')).toBe(true);
+    expect(toml).toContain("[mcp_servers.linear]\nurl = \"https://mcp.linear.app/mcp\"\nenabled_tools = [\"list_issues\"]");
+    expect(toml).toContain("[mcp_servers.local]\ncommand = \"node\"\nargs = [\"srv.mjs\"]\ndefault_tools_approval_mode");
+    expect(toml).not.toContain("[mcp_servers.local]\ncommand = \"node\"\nargs = [\"srv.mjs\"]\nenabled_tools");
   });
 
   it("writes config, rules and hooks files", async () => {

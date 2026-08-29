@@ -91,13 +91,17 @@ export class WorkspaceManager {
       context.tools.includes("post_message")
         ? "- To tag or mention another agent, include @AgentName in your message content when using post_message. For example: `post_message({ channel: \"general\", content: \"@AgentB can you help with this?\" })`. The @ mention in the text will wake that agent."
         : "",
-      "- Mentions: `@name` wakes that agent and costs a run. Use it only when you need a reply or an action from them. When you refer to an agent in the third person, or no reply is expected, write the plain name without `@`. Never `@`mention to acknowledge, thank, or confirm.",
+      "- Mentions: `@name` means \"I need a reply or an action from you\"; it wakes that agent and costs a run. Do not `@`mention when answering, acknowledging, or referring to an agent in the third person — write the plain name. Your answer is routed back to whoever asked you automatically.",
+      "- If you asked another agent something, end your turn; you will be woken when it replies. Do not poll with `read_channel` waiting for an answer.",
       "- Once what was asked has been done, stop: reply briefly without mentions rather than continuing the exchange.",
       context.tools.includes("spawn_agent")
         ? "- `spawn_agent` creates a session under your identity with a subset of your permissions. Give it a clear task and a channel to report in; sessions cannot exceed what you can do."
         : "",
       context.tools.includes("request_principal")
         ? "- Only the human can create new long-lived agents. Use `request_principal` to ask; it posts an approval request in #approvals."
+        : "",
+      context.tools.includes("request_capability")
+        ? "- If a task needs a capability your policy lacks (a denied command, network, a tool), call `request_capability` with the action and why, then end your turn. The human decides in your channel: allow once (your next turn), allow forever, or deny; you are woken with the decision."
         : "",
       "",
       "## Working alongside other agents",

@@ -16,6 +16,7 @@ export const ACTIONS = [
   "agent:spawn",
   "agent:close",
   "principal:request",
+  "capability:request",
 ] as const;
 export type Action = (typeof ACTIONS)[number];
 
@@ -34,6 +35,7 @@ export interface Policy {
 export interface Agent {
   id: string;
   kind: AgentKind;
+  ownIntegrationIds: string[];
   name: string;
   description: string;
   instructions: string;
@@ -85,6 +87,8 @@ export interface ChannelMessage {
   traceId: string;
   /** Message that directly caused this one (the one that woke the run), null for roots. */
   parentMessageId: string | null;
+  /** When set, whether the author expects an answer; otherwise inferred from a trailing "?". */
+  expectsReply?: boolean | undefined;
   createdAt: string;
 }
 
@@ -163,7 +167,10 @@ export interface AgentRun {
   status: RunStatus;
   /** `conflict`: a regenerate turn queued because the previous reply lost a race. */
   trigger: "user" | "channel" | "spawn" | "conflict";
+  /** Channel whose message woke this run. */
   channelId: string | null;
+  /** Channel the final reply is posted to (differs from channelId when answering back to where the agent was originally asked). */
+  replyChannelId: string | null;
   traceId: string | null;
   /** Message whose arrival woke this run. */
   triggerMessageId: string | null;
@@ -193,12 +200,28 @@ export interface ApprovalPayload {
   channelIds: string[];
 }
 
+export type ApprovalKind = "create_principal" | "capability";
+/** `approve`/`deny` for principal requests; `allow_once`/`allow_forever`/`deny` for capability requests. */
+export type ApprovalDecision = "approve" | "deny" | "allow_once" | "allow_forever";
+
+export interface CapabilityPayload {
+  action: string;
+  resource: string;
+  reason: string;
+}
+
 export interface ApprovalRequest {
   id: string;
   requesterId: string;
   requesterName: string;
-  kind: "create_principal";
-  payload: ApprovalPayload;
+  kind: ApprovalKind;
+  /** Requested capability, for kind "capability". */
+  capability: CapabilityPayload | null;
+  /** How an approved capability request was granted. */
+  resolution: "once" | "forever" | null;
+  /** Channel the request was posted in (the requester's working channel for capabilities). */
+  channelId: string | null;
+  payload: ApprovalPayload | null;
   status: "pending" | "approved" | "denied";
   channelMessageId: string | null;
   createdAt: string;
@@ -216,9 +239,22 @@ export interface Trace {
   live: boolean;
 }
 
+/** A one-run grant created by "allow once"; bound to the requester's next run, dropped when it ends. */
+export interface CapabilityGrant {
+  id: string;
+  agentId: string;
+  action: string;
+  resource: string;
+  approvalId: string;
+  runId: string | null;
+  createdAt: string;
+}
+
 export interface Database {
   version: 2;
   agents: Agent[];
+  integrations: Integration[];
+  grants: CapabilityGrant[];
   channels: Channel[];
   messages: ChannelMessage[];
   runs: AgentRun[];
@@ -274,4 +310,51 @@ export interface RunIdentity {
   agentId: string;
   runId: string;
   expiresAt: number;
+}
+
+// ---------- integrations (external MCP servers) ----------
+
+export type IntegrationKind = "http" | "stdio";
+export type IntegrationAuth = "oauth" | "none";
+export type IntegrationStatus = "unconnected" | "connecting" | "connected" | "error";
+
+export interface IntegrationTool {
+  name: string;
+  description: string;
+  readOnly: boolean;
+}
+
+/** An external MCP server registered by the human. Tools become IAM actions `mcp:<name>:<tool>`. */
+export interface Integration {
+  id: string;
+  /** Slug used as the Codex MCP server name and in action names. */
+  name: string;
+  kind: IntegrationKind;
+  url: string | null;
+  command: string | null;
+  args: string[];
+  auth: IntegrationAuth;
+  status: IntegrationStatus;
+  /** Discovered via tools/list after connecting; empty until then. */
+  tools: IntegrationTool[];
+  lastError: string | null;
+  connectedAt: string | null;
+  createdAt: string;
+}
+
+export interface IntegrationInput {
+  name: string;
+  kind: IntegrationKind;
+  url?: string | undefined;
+  command?: string | undefined;
+  args?: string[] | undefined;
+  auth?: IntegrationAuth | undefined;
+}
+
+/** Result of starting an OAuth login: open `url` in a browser, then poll the integration status. */
+export interface IntegrationLogin {
+  integrationId: string;
+  /** Agent id when this is a per-agent login, null for the shared login. */
+  agentId: string | null;
+  url: string;
 }

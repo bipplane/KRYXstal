@@ -3,9 +3,11 @@ import {
   deriveSessionPolicy,
   evaluate,
   grantChannels,
+  grantOverride,
   mapToolCall,
   matchResource,
   mayEver,
+  mayEverPrefix,
   presetPolicy,
   renderExecPolicyRules,
 } from "./policy.js";
@@ -91,6 +93,19 @@ describe("Delegation", () => {
   });
 });
 
+describe("Human grants override denies", () => {
+  it("lifts the matching deny and appends the allow", () => {
+    const worker = presetPolicy("worker");
+    const net = grantOverride(worker, "net:access", "*");
+    expect(evaluate(net, "net:access", "web").effect).toBe("allow");
+    expect(net.preset).toBe("custom");
+    const push = grantOverride(worker, "shell:exec", "cmd:git push");
+    expect(evaluate(push, "shell:exec", "cmd:git push origin main").effect).toBe("allow");
+    expect(evaluate(push, "shell:exec", "cmd:rm -rf /").effect).toBe("deny");
+    expect(evaluate(push, "shell:exec", "cmd:sudo ls").effect).toBe("deny");
+  });
+});
+
 describe("Codex rule rendering", () => {
   it("emits a forbidden prefix_rule for every cmd deny", () => {
     const rules = renderExecPolicyRules(presetPolicy("worker"));
@@ -120,9 +135,28 @@ describe("Tool call mapping", () => {
       resource: "*",
     });
     expect(mapToolCall("update_plan", {})).toBeNull();
-    expect(mapToolCall("mcp__other__thing", {})).toEqual({
-      action: "tool:mcp__other__thing",
+    expect(mapToolCall("mcp__linear__create_issue", { title: "x" })).toEqual({
+      action: "mcp:linear:create_issue",
       resource: "*",
     });
+    expect(mapToolCall("view_image", {})).toBeNull();
+  });
+
+  it("knows whether a policy could ever reach an MCP server", () => {
+    const grant = (actions: string[]): Policy => ({
+      preset: "custom",
+      statements: [{ effect: "allow", actions, resources: ["*"] }],
+      delegable: [],
+    });
+    expect(mayEverPrefix(grant(["mcp:linear:*"]), "mcp:linear:")).toBe(true);
+    expect(mayEverPrefix(grant(["mcp:linear:list_issues"]), "mcp:linear:")).toBe(true);
+    expect(mayEverPrefix(grant(["mcp:*"]), "mcp:linear:")).toBe(true);
+    expect(mayEverPrefix(grant(["*"]), "mcp:linear:")).toBe(true);
+    expect(mayEverPrefix(grant(["mcp:github:*"]), "mcp:linear:")).toBe(false);
+    expect(mayEverPrefix(presetPolicy("worker"), "mcp:linear:")).toBe(false);
+    expect(mayEverPrefix(presetPolicy("admin"), "mcp:linear:")).toBe(true);
+    const linearAllowed = grant(["mcp:linear:*"]);
+    expect(evaluate(linearAllowed, "mcp:linear:create_issue", "*").effect).toBe("allow");
+    expect(evaluate(linearAllowed, "mcp:github:create_issue", "*").effect).toBe("deny");
   });
 });

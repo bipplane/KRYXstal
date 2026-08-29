@@ -39,13 +39,19 @@ const TOOLS = [
       "Post a message to a channel as yourself. Mention another agent with @name to wake it. " +
       "Accepted only if you have seen the whole channel; if another agent acted first you get a " +
       "conflict naming who won and what they posted: read_channel again, reconsider, and post " +
-      "something new rather than the same text.",
+      "something new rather than the same text. " +
+      "If you are asking it something, set expects_reply so its answer wakes you; then end your turn.",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     inputSchema: {
       type: "object",
       properties: {
         channel: { type: "string", description: "Channel name without the leading #" },
         content: { type: "string" },
+        expects_reply: {
+          type: "boolean",
+          description:
+            "True when you need an answer from the agent you mentioned (default: true if the message contains a question mark).",
+        },
       },
       required: ["channel", "content"],
       additionalProperties: false,
@@ -124,6 +130,24 @@ const TOOLS = [
   },
 ];
 
+TOOLS.push({
+  name: "request_capability",
+  description:
+    "Ask the human for a capability your policy lacks (e.g. shell:exec on cmd:git push, net:access, mcp:linear:create_issue). " +
+    "The request is posted in the channel you are working in; end your turn after asking. You are woken with the decision: " +
+    "allow once (for your next turn), allow forever, or deny.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      action: { type: "string", description: "IAM action, e.g. shell:exec, net:access, mcp:<server>:<tool>" },
+      resource: { type: "string", description: "Resource pattern, e.g. cmd:git push, channel:deploys, or * (default)" },
+      reason: { type: "string", description: "Why you need it, in one or two sentences" },
+    },
+    required: ["action", "reason"],
+    additionalProperties: false,
+  },
+});
+
 const ROUTES = {
   list_channels: () => ["GET", "/api/agent/channels"],
   read_channel: (args) => [
@@ -133,7 +157,7 @@ const ROUTES = {
   post_message: (args) => [
     "POST",
     "/api/agent/channels/" + encodeURIComponent(args.channel) + "/messages",
-    { content: args.content },
+    { content: args.content, ...(typeof args.expects_reply === "boolean" ? { expects_reply: args.expects_reply } : {}) },
   ],
   create_channel: (args) => [
     "POST",
@@ -143,6 +167,7 @@ const ROUTES = {
   spawn_agent: (args) => ["POST", "/api/agent/spawn", args],
   close_agent: (args) => ["POST", "/api/agent/close", { agentId: args.agent_id }],
   request_principal: (args) => ["POST", "/api/agent/requests", args],
+  request_capability: (args) => ["POST", "/api/agent/requests/capability", args],
 };
 
 async function callControlPlane(method, route, body) {

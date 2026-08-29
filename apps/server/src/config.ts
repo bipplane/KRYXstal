@@ -38,6 +38,8 @@ const envSchema = z.object({
   /** URL the Codex runtime uses to reach this control plane. */
   AGENT_API_BASE_URL: z.string().url().optional(),
   USER_NAME: z.string().trim().min(1).max(40).default("You"),
+  /** Loopback port Codex listens on for MCP OAuth callbacks (one login at a time). */
+  MCP_OAUTH_CALLBACK_PORT: z.coerce.number().int().min(1).max(65535).default(4545),
   APP_AUTH_TOKEN: z
     .string()
     .trim()
@@ -121,6 +123,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
     runtimeScriptsDir: path.resolve(env.RUNTIME_SCRIPTS_DIR ?? defaultScriptsDir),
     agentApiBaseUrl: (env.AGENT_API_BASE_URL ?? defaultAgentApiBaseUrl).replace(/\/+$/, ""),
     userName: env.USER_NAME,
+    oauthCallbackPort: env.MCP_OAUTH_CALLBACK_PORT,
     authToken,
     modelProvider: env.MODEL_PROVIDER,
     localCodexHome: path.resolve(env.LOCAL_CODEX_HOME ?? path.join(homedir(), ".codex")),

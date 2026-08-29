@@ -2038,3 +2038,337 @@ textarea {
 .run-conflict .msg-glyph {
   font-size: 13px;
 }
+
+/* ---------- integrations ---------- */
+
+.pill-connected {
+  color: var(--green);
+  border-color: #bfe0d1;
+  background: var(--green-soft);
+}
+.pill-connected .pill-dot {
+  background: var(--green);
+}
+.pill-connecting {
+  color: var(--purple-dark);
+  border-color: var(--purple-line);
+  background: var(--purple-soft);
+}
+.pill-connecting .pill-dot {
+  background: var(--purple);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+.integ-nav .nav-label {
+  flex: 1;
+}
+.integ-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--grey);
+  flex-shrink: 0;
+}
+.integ-dot-connected {
+  background: var(--green);
+}
+.integ-dot-connecting {
+  background: var(--purple);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+.integ-dot-error {
+  background: var(--red);
+}
+
+.integ-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.integ-intro {
+  line-height: 1.5;
+}
+.integ-empty {
+  padding: 14px;
+  border-radius: 8px;
+  background: var(--paper-2);
+  border: 1px dashed var(--line);
+  text-align: center;
+}
+.integ-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.integ-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+}
+.integ-row-error {
+  border-color: #f0c9c9;
+}
+.integ-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.integ-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--ink);
+}
+.integ-name {
+  font-weight: 600;
+  font-family: var(--mono);
+  font-size: 13px;
+}
+.integ-meta {
+  margin-left: auto;
+  white-space: nowrap;
+}
+.integ-target code {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-block;
+  vertical-align: bottom;
+}
+.integ-hint {
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--purple-soft);
+  color: var(--purple-dark);
+  border: 1px solid var(--purple-line);
+}
+.integ-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.integ-tools {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 8px 0 0;
+  border-top: 1px solid var(--line-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 260px;
+  overflow: auto;
+}
+.integ-tool-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.integ-tool-desc {
+  margin-top: 2px;
+  line-height: 1.4;
+}
+.integ-tools-empty {
+  padding-top: 6px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.integ-add {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line-soft);
+}
+.integ-form {
+  padding: 12px;
+  border-radius: 10px;
+  background: var(--paper-2);
+  border: 1px solid var(--line-soft);
+}
+.integ-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.integ-radios {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.integ-radio {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  cursor: pointer;
+}
+.integ-radio input {
+  width: auto;
+  margin: 0;
+  accent-color: var(--purple);
+}
+.integ-radio-active {
+  border-color: var(--purple);
+  background: var(--purple-soft);
+}
+.integ-radio-disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* wizard: pick tools per integration */
+.integ-pick-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.integ-pick {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  padding: 4px 6px 6px;
+}
+.integ-pick-head {
+  font-weight: 500;
+}
+.integ-pick-tools {
+  margin-left: 22px;
+  max-height: 200px;
+}
+.integ-pick-empty {
+  padding: 2px 8px 4px 30px;
+}
+
+/* inspector: per-agent access + login identity */
+.integ-agent {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.integ-agent-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.integ-agent-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #fff;
+  border: 1px solid var(--line-soft);
+}
+.integ-agent-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.integ-agent-login {
+  margin-left: auto;
+}
+.integ-agent-tools {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+}
+.integ-agent-tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.integ-agent-tool-allow code {
+  border-color: #bfe0d1;
+  background: var(--green-soft);
+  color: var(--green);
+}
+.integ-agent-tool-deny code {
+  border-color: #f0c9c9;
+  background: var(--red-soft);
+  color: var(--red);
+}
+.integ-agent-tool-none code {
+  color: var(--muted);
+  opacity: 0.7;
+}
+
+/* approval cards: never squeeze in narrow panes (DMs, trace) */
+.approval-card {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+.approval-head {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+.approval-head .msg-time {
+  margin-left: auto;
+}
+.approval-body {
+  min-width: 0;
+}
+.approval-body .msg-text,
+.approval-body .msg-code,
+.approval-line,
+.approval-facts dd {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.approval-facts {
+  grid-template-columns: minmax(56px, 80px) minmax(0, 1fr);
+}
+.approval-facts code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.approval-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+@media (max-width: 1280px) {
+  .approval-facts {
+    grid-template-columns: 1fr;
+    gap: 2px 0;
+  }
+  .approval-facts dt {
+    margin-top: 6px;
+  }
+}
+
+/* rows in the scrolling message list must never be flex-shrunk (the approval
+   card has overflow:hidden, which otherwise lets it collapse to a sliver) */
+.message-list > * {
+  flex-shrink: 0;
+}
+.approval-card {
+  flex-shrink: 0;
+}

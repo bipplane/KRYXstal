@@ -44,6 +44,24 @@ long-lived agent call `request_principal`, which posts an approval card to
 | `deployer` | worker + `net:access` | `rm -rf /`, `sudo` | + net:access |
 | `admin` | everything | — | `*` |
 
+### Escalation: asking for a capability
+
+An agent that hits a policy limit mid-task calls `request_capability(action,
+resource?, reason)`. The request is posted as a card **in the channel the
+agent is working in** (the group channel or the DM) and mirrored into
+`#approvals`; the agent ends its turn, and the human picks one of:
+
+| Decision | Effect |
+| --- | --- |
+| **Allow once** | A grant bound to the agent's *next run*: the tool/command is exposed in that run's generated config and allowed by the hook, then the grant is discarded when the run ends. |
+| **Allow forever** | The agent's policy is updated: any deny covering the request is lifted and an allow statement is added (preset becomes `custom`). |
+| **Deny** | Recorded; nothing changes. |
+
+Every decision is a `Decision` row (`tool: request_capability`), the outcome
+is posted in the channel, and the agent is woken with it so it can continue
+where it was asked. Human grants override policy denies — the human is the
+root of every agent's authority.
+
 ## Enforcement path
 
 Every turn is one `codex exec` process started with a fresh, per-agent
@@ -86,6 +104,31 @@ On Linux inside the hardened POC container (`--cap-drop ALL`,
 `danger-full-access` for the *inner* sandbox. Layers 1–4 and the container
 boundary remain in force; the fallback is logged at startup.
 
+## Integrations (external MCP servers)
+
+The human registers external MCP servers — streamable HTTP with OAuth (Linear,
+GitHub, Notion, …) or local stdio servers — under **Integrations**. Connecting
+runs `codex mcp login <name>` in a control-plane-owned `$CODEX_HOME`
+(`codex-home/oauth/`): Codex prints the authorize URL, the UI opens it, the
+provider redirects to Codex's loopback listener (`MCP_OAUTH_CALLBACK_PORT`),
+and the tokens land in `codex-home/oauth/.credentials.json`. Tools are then
+discovered with `tools/list`.
+
+Every tool becomes an IAM action **`mcp:<server>:<tool>`** (globs allowed).
+Nothing is granted by default: an agent only sees a server in its generated
+`config.toml` when its policy could ever allow something on it, `enabled_tools`
+is trimmed to what the policy allows, the credentials file is copied into the
+agent's home for that run, and the `PreToolUse` hook still checks each call.
+Delegation works unchanged (`mcp:linear:*` can be delegated only by a parent
+that holds it and lists it as delegable).
+
+Shared login is the default: agents borrow the human's grant, scoped by
+policy, and the provider sees one identity — per-agent attribution lives in
+the decision log. "Use own login" on an agent runs the same flow inside that
+agent's `$CODEX_HOME`, giving it a distinct token at the provider; an agent
+with any own login keeps its own credentials file and does not receive the
+shared one.
+
 ## Scheduler
 
 - A message wakes every agent member of a DM, and only `@mentioned` agents in
@@ -95,9 +138,15 @@ boundary remain in force; the fallback is logged at startup.
   participant whose turn follows the author's is woken too, round-robin. The
   prompt contains the messages since the agent's last turn in that channel,
   windowed by message `seq`.
-- An agent's final reply is posted automatically to the channel that woke it.
-  Tool calls are for acting elsewhere. Every channel write, tool or automatic,
-  is also subject to the read-before-act check in
+- `@name` means "I need a reply or an action from you". An answer needs no
+  mention: when a run was woken by a message that mentioned the author *and*
+  expected a reply (`post_message(expects_reply: true)`, or a `?` in the
+  text), the run's reply wakes the asker automatically and is posted back
+  where the agent was originally asked. Agents are told to end their turn
+  after asking rather than polling with `read_channel`.
+- An agent's final reply is posted automatically to the channel that woke it
+  (or where it was asked). Tool calls are for acting elsewhere. Every channel
+  write, tool or automatic, is also subject to the read-before-act check in
   [SYNCHRONISATION.md](SYNCHRONISATION.md): a reply that lost a race is not
   posted, and the agent gets a regenerate turn carrying the feedback. A reply
   of exactly `[no reply]` posts nothing and passes the turn.
