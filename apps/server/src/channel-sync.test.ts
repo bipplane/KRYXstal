@@ -397,6 +397,53 @@ describe("Turn-taking", () => {
   });
 });
 
+describe("Passing the turn", () => {
+  it("hands a silent turn to the next participant and ends the round after a full circle", async () => {
+    let service!: AgentService;
+    const general = () => service.getChannelByName("general").id;
+    const posted = (content: string) => service.getMessages(general()).some((m) => m.content === content);
+    const runner: AgentRunner = {
+      run: async (request) => {
+        const me = service.getAgent(request.agentId);
+        // The human's message appears as a "] You: …" line; later prompts only quote it as chain context.
+        const fromHuman = /\] You: .*go/.test(request.prompt);
+        if (fromHuman && me.name !== "AgentA") {
+          // B and C answer the human only after A's "one" has landed, so the order is stable.
+          await expect.poll(() => posted("one"), { timeout: 5_000 }).toBe(true);
+        }
+        if (me.name === "AgentA" && fromHuman) return { output: "one", threadId: null, usage: null };
+        if (me.name === "AgentC" && request.prompt.includes("one")) return { output: "three", threadId: null, usage: null };
+        return { output: "[no reply]", threadId: null, usage: null };
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    };
+    ({ service } = await makeService(runner));
+    const a = await service.createAgent({ name: "AgentA" });
+    const b = await service.createAgent({ name: "AgentB" });
+    const c = await service.createAgent({ name: "AgentC" });
+    const root = await service.postUserMessage(general(), "@AgentA @AgentB @AgentC go");
+    await expect.poll(() => posted("three") && !service.getTrace(root.id).live, { timeout: 5_000 }).toBe(true);
+    await sleep(100);
+    expect(
+      service
+        .getMessages(general())
+        .filter((m) => m.kind === "message" && m.authorKind !== "user")
+        .map((m) => m.authorName + ":" + m.content),
+    ).toEqual(["AgentA:one", "AgentC:three"]);
+    // B passed, so the turn went on to C, who had something to say; after "three" both A and B
+    // passed and the round ended without a budget pause.
+    const one = service.getMessages(general()).find((m) => m.content === "one");
+    const three = service.getRuns(c.id).find((run) => run.output === "three");
+    expect(three?.triggerMessageId).toBe(one?.id);
+    expect(service.getRuns(a.id).length).toBe(2);
+    expect(service.getRuns(b.id).length).toBeGreaterThanOrEqual(2);
+    expect(service.getRuns(c.id).length).toBe(2);
+    expect(service.getMessages(general()).some((m) => m.content.startsWith("Paused"))).toBe(false);
+    expect(service.getTrace(root.id).runs.every((run) => run.status === "completed")).toBe(true);
+  });
+});
+
 describe("Countdown demo", () => {
   it("N agents count down 10..1 exactly once each, in order, with visible conflicts", async () => {
     const N = 3;

@@ -1648,25 +1648,68 @@ export class AgentService {
     }
   }
 
+  /** Agents that have run in this trace and channel, in the order they first did. */
+  private participantOrder(
+    database: Readonly<Database>,
+    channelId: string,
+    traceId: string,
+  ): string[] {
+    const order: string[] = [];
+    for (const run of [...database.runs]
+      .filter((run) => run.traceId === traceId && run.channelId === channelId)
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))) {
+      if (!order.includes(run.agentId)) order.push(run.agentId);
+    }
+    return order;
+  }
+
+  private nextAfter(order: string[], agentId: string): string | null {
+    if (order.length < 2) return null;
+    const index = order.indexOf(agentId);
+    for (let step = 0; step < order.length; step += 1) {
+      const candidate = order[(index + 1 + step) % order.length];
+      if (candidate && candidate !== agentId) return candidate;
+    }
+    return null;
+  }
+
   /** The participant whose turn follows the author's, or null outside a collaboration. */
   private nextParticipant(
     database: Readonly<Database>,
     channelId: string,
     message: ChannelMessage,
   ): string | null {
-    const order: string[] = [];
-    for (const run of [...database.runs]
-      .filter((run) => run.traceId === message.traceId && run.channelId === channelId)
-      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))) {
-      if (!order.includes(run.agentId)) order.push(run.agentId);
-    }
-    if (order.length < 2) return null;
-    const index = order.indexOf(message.authorId);
-    for (let step = 0; step < order.length; step += 1) {
-      const candidate = order[(index + 1 + step) % order.length];
-      if (candidate && candidate !== message.authorId) return candidate;
-    }
-    return null;
+    return this.nextAfter(this.participantOrder(database, channelId, message.traceId), message.authorId);
+  }
+
+  /**
+   * A silent turn passes to the next participant rather than ending the
+   * round: the agent had nothing to add, but the others may. Once every other
+   * participant has passed since the last posted message, the round is over.
+   */
+  private async passTurn(agent: Agent, run: AgentRun): Promise<void> {
+    if (!run.channelId || !run.traceId) return;
+    const database = this.store.peek();
+    const channel = database.channels.find((item) => item.id === run.channelId);
+    if (!channel || channel.kind === "dm") return;
+    const head = channelHead(database, channel.id);
+    if (!head || head.traceId !== run.traceId) return;
+    const order = this.participantOrder(database, channel.id, run.traceId);
+    const passes = database.runs.filter(
+      (item) =>
+        item.channelId === channel.id &&
+        item.traceId === run.traceId &&
+        item.silent &&
+        item.createdAt > head.createdAt,
+    ).length;
+    if (passes >= order.length - 1) return;
+    const next = this.nextAfter(order, agent.id);
+    if (!next || next === head.authorId) return;
+    const member = channel.memberIds.includes(next);
+    const candidate = database.agents.find((item) => item.id === next);
+    if (!member || !candidate || candidate.status === "stopped" || candidate.status === "closed") return;
+    if (evaluate(candidate.policy, "channel:read", "channel:" + channel.name).effect !== "allow") return;
+    await this.queueTurn(next, channel.id, head);
   }
 
   /** True (and posts a notice once) when one prompt has already caused TRACE_BUDGET runs. */
@@ -1967,6 +2010,8 @@ export class AgentService {
         await this.wakeMembers(outcome.posted.channelId, outcome.posted);
       } else if (outcome.conflict && outcome.channelId) {
         this.regenerateAfterConflict(agentAtStart, run, outcome.channelId, outcome.conflict);
+      } else if (outcome.silent) {
+        await this.passTurn(agentAtStart, run);
       }
     } catch (error) {
       const completedAt = now();
@@ -2021,7 +2066,12 @@ export class AgentService {
     run: AgentRun,
     result: RunnerResult,
     events: RunEvent[],
-  ): Promise<{ posted: ChannelMessage | null; conflict: Conflict | null; channelId: string | null }> {
+  ): Promise<{
+    posted: ChannelMessage | null;
+    conflict: Conflict | null;
+    channelId: string | null;
+    silent: boolean;
+  }> {
     const output = result.output.trim();
     const silent = isNoReply(output);
     const channelId = run.channelId ?? agentAtStart.dmChannelId;
@@ -2092,7 +2142,7 @@ export class AgentService {
             : { ok: false, conflict: outcome.conflict ?? this.busyConflict(agentAtStart, channel, output, run.id, null) },
         );
       }
-      return { ...outcome, channelId: channel?.id ?? null };
+      return { ...outcome, channelId: channel?.id ?? null, silent };
     } finally {
       lease?.release();
     }
