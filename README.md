@@ -8,9 +8,11 @@ Run it locally with Docker, Colima, or rootless Podman, or deploy it to
 Volcengine ECS.
 
 > [!WARNING]
-> This is a single-user proof of concept. It intentionally has no identity,
-> tracing, audit, or hardened sandbox middleware. Do not use production data or
-> credentials. See [SECURITY.md](SECURITY.md).
+> This is a single-user proof of concept. It has Agent identity, IAM,
+> synchronisation, trace, and audit middleware, but no human identity, tenancy,
+> production secret manager, distributed store, or hardened multi-tenant
+> sandbox. Do not use production data or credentials. See
+> [SECURITY.md](SECURITY.md).
 
 ## Screenshots
 
@@ -22,24 +24,190 @@ Volcengine ECS.
 
 ![Create Agent form with name, description, and workspace instructions](docs/assets/create-agent.jpg)
 
-## Features
+## Current features
 
-- Slack-shaped Web UI: channels, agents, and an inspector with policy, runs, and audit
-- Every Agent is an IAM-style **principal** with an allow/deny policy and a delegable set
-- Agents collaborate through channels; DMs, `@mentions` and `@everyone` wake
-  them
-- Per-channel synchronisation: a lock per resource and a server-side
-  read-before-act check, so for any contended action exactly one agent
-  succeeds and the losers are told who won and what to do next
-- Enforcement in the backend and in the Codex runtime: a `PreToolUse` hook,
-  generated execpolicy rules, per-agent MCP tool allowlists, and the sandbox
-- Agents spawn **sessions** (subagents) with a strictly narrower policy; only
-  the human creates principals, agents can only request one in `#approvals`
-- Fastify control plane with asynchronous Runs, per-run identity tokens, and a
-  decision log
-- Persistent Agent workspaces and Codex sessions
-- Disposable Docker, Colima, or Podman container for each local turn
-- Docker and Terraform deployment paths for Volcengine ECS
+### Agent lifecycle and identity
+
+- Create, inspect, edit, start, stop, and delete principal Agents from browser.
+- Durable UUID identity, status, parent/root principal links, instructions,
+  policy, workspace, Codex thread, error, and timestamps.
+- Status lifecycle: `ready`, `busy`, `stopped`, `error`, `closed`.
+- Human creates durable **principals**. Agents spawn narrower **sessions** under
+  parent authority; maximum depth three.
+- Every Agent receives private DM, separate workspace, separate Codex session,
+  and generated platform `AGENTS.md`.
+- Delete cancels execution, closes descendants, removes active metadata, and
+  archives workspace under `workspaces/.deleted/`.
+
+### Channels and multi-Agent collaboration
+
+- Slack-shaped public, DM, and system channels.
+- `#general` and human-only `#approvals` bootstrapped automatically.
+- Human, principal, session, and system authors; normal, system, denial,
+  spawn, approval, and conflict messages.
+- DMs wake eligible members. Public channels wake `@name`, session slug,
+  `@all`, or `@everyone` recipients.
+- Replies to Agent questions route back to asker automatically through causal
+  message/Run lineage.
+- Busy Agent wakes coalesce by channel and drain serially.
+- Shared-task default uses `@everyone`. Optional `TURN_TAKING=on` wakes next
+  established participant round-robin.
+- Exact `[no reply]` output posts nothing and wakes nobody; in turn-taking mode
+  it passes turn until round ends.
+- Configurable chatter and trace budgets stop runaway Agent conversations
+  (both default 64).
+
+### Per-channel synchronisation
+
+- Every message has strict, 1-based, per-channel sequence; channel tracks
+  `lastSeq`.
+- Server-owned read cursor tracks channel sequence used for freshness checks;
+  pagination edge cases are documented in future-work gaps.
+- FIFO lock per resource, five-second bounded wait, ten-second expiring lease.
+- Read-before-act enforced for `post_message` and automatic final replies.
+- Validate and commit run inside one store mutation under lock, accepting one
+  current writer under contention.
+- Stale/busy write returns structured HTTP 409 conflict: winner, unseen state,
+  rejected content, cursor/head, attempt, and next action.
+- Policy denial remains HTTP 403. Synchronisation conflict is separate
+  Decision effect, never confused with missing permission.
+- Stale automatic reply is withheld; Agent receives conflict-triggered
+  regenerate Run and re-plans from winning state.
+- Conflict chain capped at three attempts. Normal pending wake and regeneration
+  merge into one turn.
+- Channel-name creation and approval resolution use same synchronised
+  compare-and-set primitive.
+- Product channel/trace views hide internal race notices; Run cards and audit
+  retain full evidence.
+
+See [Synchronisation](docs/SYNCHRONISATION.md) for protocol and invariants.
+
+### IAM policy and delegation
+
+- AWS-like semantics: explicit deny wins, matching allow next, implicit deny
+  otherwise.
+- Statements contain effect, globbed actions, and globbed resources.
+- Built-in actions cover channel read/post/create, shell execution, filesystem
+  writes, network, Agent spawn/close, principal requests, and capability
+  requests.
+- External tools use namespaced actions `mcp:<server>:<tool>`.
+- Channel resources use `channel:<name>`; shell resources use token-prefix
+  `cmd:<argv>` matching.
+- Reader, worker, deployer, admin presets plus custom policy editor.
+- Channel membership and policy both required.
+- Parent can delegate only actions it holds and explicitly marks delegable.
+- Session receives requested subset plus every parent deny; descendant cannot
+  exceed ancestor authority.
+- Ancestor-only session close; cascade closure.
+
+See [Multi-agent IAM](docs/MULTI_AGENT_IAM.md) for complete model.
+
+### Runtime enforcement
+
+Each turn gets freshly rendered per-Agent `$CODEX_HOME`:
+
+1. unavailable Launchpad/external MCP tools omitted;
+2. literal denied commands compiled into Codex execpolicy rules;
+3. fail-closed `PreToolUse` hook calls `/api/iam/evaluate`;
+4. Agent MCP API re-checks policy and membership server-side;
+5. Codex sandbox and optional outer Runtime container contain execution.
+
+Additional controls:
+
+- Short-lived random per-Run `AGENT_TOKEN`, revoked when Run ends.
+- `approval_policy = never`; model cannot approve itself.
+- Native Codex multi-Agent orchestration disabled; Launchpad owns delegation.
+- Read-only sandbox when filesystem write can never be granted.
+- Network/web search disabled when network cannot ever be granted.
+- Agent/model shell excludes `AGENT_TOKEN`, `ARK_API_KEY`, and
+  `LAUNCHPAD_URL`.
+- Hook fails closed on invalid input, absent identity, timeout, or unreachable
+  control plane.
+- Every authorisation/synchronisation check records actor, Run, source, tool,
+  action, resource, effect, reason, trace, and time.
+
+### Human approvals and escalation
+
+- Agent requests new durable principal through approval card in `#approvals`.
+- Agent requests missing capability in working channel; request mirrors to
+  `#approvals`.
+- Human choices: deny, allow once for next Run, or allow forever.
+- One-time grant binds to Run, affects generated tool/rule surface, then is
+  consumed.
+- Permanent grant removes covering deny and appends explicit allow.
+- Resolution, Decision, messages, and requester wake retain causal linkage.
+- Approval resolution is race-safe: concurrent clicks resolve exactly once.
+
+### Traces, Runs, and audit
+
+- Every human-rooted chain carries `traceId`; derived messages carry
+  `parentMessageId`; Runs retain trigger message and reply channel.
+- Cross-channel trace query returns root, messages, Runs, decisions, channels,
+  Agents, and live status.
+- UI supports causal tree and chronological timeline with channel hops.
+- Runs: queued/running/completed/failed/cancelled, trigger type, prompt, output,
+  error, usage, timestamps, `seenSeq`, conflicts, silent state.
+- Events: command execution, MCP call, file change, web search, reasoning,
+  synchronisation conflict.
+- Live events visible before completion; persisted events capped at 300 per
+  Run and details clipped to 4,000 characters.
+- Agent inspector shows lifecycle, policy, channels, sessions, Runs, and
+  decisions. Global inspector provides full audit view.
+- Fastify logs redact authorisation and cookie headers.
+
+### External MCP integrations
+
+- Register streamable HTTP or local stdio MCP servers.
+- OAuth or no-auth connection; browser-assisted `codex mcp login` for HTTP.
+- Shared control-plane login or distinct per-Agent provider identity.
+- Tool discovery through `tools/list`; metadata includes description and
+  read-only hint.
+- Integration server/tool hidden unless Agent policy may use it.
+- Per-Agent `enabled_tools` list plus hook check on every invocation.
+- UI supports add, connect, logout, rediscover, remove, inspect tools, grant
+  whole integration or individual tool.
+
+### Execution, workspaces, and reliability
+
+- Asynchronous Runs with one active Run per Agent.
+- First turn creates Codex thread; subsequent turns resume it.
+- Persistent per-Agent workspaces and Codex homes.
+- Configurable timeout and output byte ceiling.
+- Stop/cancel sends graceful termination then force kill/removal.
+- Restart reconciliation cancels orphaned Runs and resets busy Agents.
+- Synchronisation cursors rebuild from persisted Run/message state.
+- Run errors persist and post understandable channel notice.
+- Generated workspace instructions track role, policy, channels, available
+  tools, and collaboration protocol.
+
+### Runtime providers and deployment
+
+- Host-process runner for development/ECS profile.
+- Disposable Docker, Colima, or Podman container per local turn.
+- Container runs configured non-root user with init, CPU/memory/PID limits,
+  all Linux capabilities dropped, and `no-new-privileges`.
+- Only workspace, Agent Codex home, and read-only runtime scripts mounted.
+- Docker host and rootless Podman compatibility handled.
+- Ark Responses API or local Codex login/model provider.
+- Docker Compose, existing ECS deployment script, and Terraform environment.
+
+### Persistence, API, UI, and verification
+
+- Versioned JSON database for Agents, integrations, grants, channels, messages,
+  Runs, decisions, and approvals.
+- Serial copy-on-write mutations and atomic temporary-file rename.
+- Mode `0600` for metadata and generated policy/config files.
+- v1→v2 migration plus idempotent message sequence assignment.
+- Fastify API with Zod validation and optional timing-safe shared demo token.
+- React UI for channels, traces, Agents, policies, approvals, integrations,
+  Runs, decisions, lifecycle, and runtime status.
+- Tests cover lifecycle, IAM, delegation, scheduler, synchronisation,
+  concurrency, approval races, traces, integrations, runner/container protocol,
+  persistence/migration, hook/MCP runtime, and policy semantics.
+- `npm run check` runs TypeScript checks, server tests, and production builds.
+
+Future designs and implementation guardrails live in
+[Future middleware ideas](docs/FUTURE_IDEAS.md).
 
 ## Debugging with a local Codex login
 
@@ -312,6 +480,7 @@ docker compose config
 - [Architecture](docs/ARCHITECTURE.md)
 - [Multi-agent IAM](docs/MULTI_AGENT_IAM.md)
 - [Synchronisation](docs/SYNCHRONISATION.md)
+- [Future middleware ideas and implementation guardrails](docs/FUTURE_IDEAS.md)
 - [Local POC](docs/LOCAL_POC.md)
 - [Deployment](docs/DEPLOYMENT.md)
 - [Hackathon extension guide](docs/HACKATHON_EXTENSION_GUIDE.md)
