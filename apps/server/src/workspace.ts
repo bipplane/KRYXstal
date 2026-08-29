@@ -86,7 +86,8 @@ export class WorkspaceManager {
           context.tools.join(", ") +
           ") to read other channels, post elsewhere, or coordinate with other agents."
         : "- You have no channel tools; reply in prose only.",
-      "- Mentions: `@name` wakes that agent and costs a run. Use it only when you need a reply or an action from them. When you refer to an agent in the third person, or no reply is expected, write the plain name without `@`. Never `@`mention to acknowledge, thank, or confirm.",
+      "- Mentions: `@name` means \"I need a reply or an action from you\"; it wakes that agent and costs a run. Do not `@`mention when answering, acknowledging, or referring to an agent in the third person — write the plain name. Your answer is routed back to whoever asked you automatically.",
+      "- If you asked another agent something, end your turn; you will be woken when it replies. Do not poll with `read_channel` waiting for an answer.",
       "- Once what was asked has been done, stop: reply briefly without mentions rather than continuing the exchange.",
       context.tools.includes("spawn_agent")
         ? "- `spawn_agent` creates a session under your identity with a subset of your permissions. Give it a clear task and a channel to report in; sessions cannot exceed what you can do."

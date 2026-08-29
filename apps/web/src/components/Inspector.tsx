@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, ApiError } from "../api";
-import type { Agent, AgentRun, Channel, Decision, Overview, RunEvent, RunEventType } from "../types";
+import type { Agent, AgentRun, Channel, Decision, Integration, Overview, RunEvent, RunEventType } from "../types";
+import AgentIntegrations from "./AgentIntegrations";
 import {
   Avatar,
   EffectBadge,
@@ -37,6 +38,8 @@ interface InspectorProps {
   onSelectChannel: (channelId: string) => void;
   onSelectAgent: (agent: Agent) => void;
   onClear: () => void;
+  /** Re-fetches the overview after an action whose result only shows up in polled data. */
+  onRefresh: () => Promise<void>;
 }
 
 export default function Inspector(props: InspectorProps) {
@@ -61,6 +64,7 @@ function AgentInspector({
   onSelectChannel,
   onSelectAgent,
   onClear,
+  onRefresh,
 }: InspectorProps & { agent: Agent }) {
   const now = useNow(10000);
   const [runs, setRuns] = useState<AgentRun[] | null>(null);
@@ -241,7 +245,7 @@ function AgentInspector({
       </header>
 
       <Section title="Policy" defaultOpen>
-        <PolicyView agent={agent} />
+        <PolicyView agent={agent} integrations={overview?.integrations ?? []} onRefresh={onRefresh} />
       </Section>
 
       <Section title="Channels" count={channels.length}>
@@ -325,7 +329,15 @@ function channelLabel(channel: Channel, agents: Agent[], overview: Overview | nu
 
 // ---------- policy ----------
 
-function PolicyView({ agent }: { agent: Agent }) {
+function PolicyView({
+  agent,
+  integrations,
+  onRefresh,
+}: {
+  agent: Agent;
+  integrations: Integration[];
+  onRefresh: () => Promise<void>;
+}) {
   const { policy } = agent;
   return (
     <div className="policy">
@@ -371,6 +383,7 @@ function PolicyView({ agent }: { agent: Agent }) {
           <CodeList items={policy.delegable} />
         )}
       </div>
+      <AgentIntegrations agent={agent} integrations={integrations} onRefresh={onRefresh} />
     </div>
   );
 }

@@ -6,6 +6,7 @@ import type { Agent, ChannelMessage, Database } from "./types.js";
 const emptyDatabase = (): Database => ({
   version: 2,
   agents: [],
+  integrations: [],
   channels: [],
   messages: [],
   runs: [],
@@ -62,6 +63,7 @@ export function migrateV1(raw: {
     (agent): Agent => ({
       id: agent.id,
       kind: "principal",
+      ownIntegrationIds: [],
       name: agent.name,
       description: agent.description,
       instructions: agent.instructions,
@@ -100,6 +102,7 @@ export function migrateV1(raw: {
     status: run.status as Database["runs"][number]["status"],
     trigger: "user",
     channelId: null,
+    replyChannelId: null,
     traceId: null,
     triggerMessageId: null,
     prompt: run.prompt,

@@ -422,3 +422,51 @@ describe("Trace budget", () => {
     await expect.poll(() => service.getTrace(again.id).runs.length).toBeGreaterThan(0);
   });
 });
+
+describe("Reply routing", () => {
+  it("wakes the agent that asked when the answer arrives, without a mention, and stops there", async () => {
+    let service!: AgentService;
+    const prompts: Array<{ agent: string; prompt: string }> = [];
+    const runner: AgentRunner = {
+      run: async (request) => {
+        const me = service.getAgent(request.agentId);
+        prompts.push({ agent: me.name, prompt: request.prompt });
+        if (me.name === "Asker" && prompts.filter((p) => p.agent === "Asker").length === 1) {
+          // Turn 1: ask Answerer in #general and end the turn.
+          await service.agentPostMessage(
+            { agentId: request.agentId, runId: request.runId, expiresAt: Date.now() + 60_000 },
+            "general",
+            "@Answerer who is csgod?",
+          );
+          return { output: "Asked Answerer; waiting.", threadId: "asker", usage: null };
+        }
+        if (me.name === "Answerer") return { output: "Kavish.", threadId: "answerer", usage: null };
+        // Asker turn 2: got the answer, report back (no mention).
+        return { output: "Answerer says Kavish.", threadId: "asker", usage: null };
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    };
+    ({ service } = await makeService(runner));
+    const asker = await service.createAgent({ name: "Asker" });
+    await service.createAgent({ name: "Answerer" });
+    const root = await service.sendMessage(asker.id, "ask Answerer who csgod is and tell me");
+    await expect.poll(() => service.getTrace(root.message.id).runs.filter((r) => r.status === "completed").length).toBe(3);
+    await expect.poll(() => service.getTrace(root.message.id).live).toBe(false);
+    const trace = service.getTrace(root.message.id);
+    expect(trace.runs.map((run) => service.getAgent(run.agentId).name)).toEqual(["Asker", "Answerer", "Asker"]);
+    const second = prompts[2];
+    expect(second?.agent).toBe("Asker");
+    expect(second?.prompt).toContain("Kavish.");
+    expect(second?.prompt).toContain("Chain context");
+    // The answer did not mention Asker; it was routed by lineage. Asker's report mentions nobody, so nothing else wakes.
+    const answer = trace.messages.find((m) => m.content === "Kavish.");
+    expect(answer?.content).not.toContain("@");
+    expect(trace.runs).toHaveLength(3);
+    // The relay goes back to where Asker was originally asked: the user's DM, not #general.
+    const report = trace.messages.find((m) => m.content === "Answerer says Kavish.");
+    expect(report?.channelId).toBe(asker.dmChannelId);
+    expect(trace.runs[2]?.replyChannelId).toBe(asker.dmChannelId);
+    expect(second?.prompt).toContain("where you were originally asked");
+  });
+});

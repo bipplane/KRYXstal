@@ -354,7 +354,33 @@ export function mapToolCall(toolName: string, toolInput: unknown): ToolCallMappi
         return { action: "tool:launchpad:" + tool, resource: "*" };
     }
   }
+  if (mcp) {
+    return { action: "mcp:" + (mcp[1] ?? "") + ":" + (mcp[2] ?? ""), resource: "*" };
+  }
   return { action: "tool:" + toolName, resource: "*" };
+}
+
+/**
+ * True when some allow statement could grant an action starting with `prefix`
+ * (e.g. "mcp:linear:"), ignoring resources. Used to decide whether to expose
+ * an MCP server to an agent at all.
+ */
+export function mayEverPrefix(policy: Policy, prefix: string): boolean {
+  const blanketDeny = policy.statements.some(
+    (statement) =>
+      statement.effect === "deny" &&
+      statement.resources.includes("*") &&
+      statement.actions.some((pattern) => pattern === "*" || pattern === prefix + "*"),
+  );
+  if (blanketDeny) return false;
+  return policy.statements.some(
+    (statement) =>
+      statement.effect === "allow" &&
+      statement.actions.some((pattern) => {
+        const literal = pattern.split("*")[0] ?? "";
+        return literal.startsWith(prefix) || prefix.startsWith(literal);
+      }),
+  );
 }
 
 export function isKnownAction(action: string): boolean {

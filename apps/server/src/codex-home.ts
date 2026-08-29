@@ -1,4 +1,4 @@
-import { access, mkdir, symlink, unlink, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, symlink, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { AppConfig } from "./config.js";
 import { mayEver, renderExecPolicyRules } from "./policy.js";
@@ -17,6 +17,16 @@ export const MCP_TOOL_ACTIONS: Record<string, string> = {
   request_principal: "principal:request",
 };
 
+export interface ExternalMcpServer {
+  name: string;
+  kind: "http" | "stdio";
+  url: string | null;
+  command: string | null;
+  args: string[];
+  /** null = expose every tool (the hook still enforces the policy). */
+  enabledTools: string[] | null;
+}
+
 export interface CodexHomeInput {
   /** Host directory to render into. */
   dir: string;
@@ -24,6 +34,10 @@ export interface CodexHomeInput {
   agent: Agent;
   /** Path to the runtime scripts as seen by the Codex process. */
   scriptsDir: string;
+  /** External MCP servers this agent's policy may use. */
+  integrations?: ExternalMcpServer[] | undefined;
+  /** Shared OAuth credentials file to place into the home (copied), or null to leave the home's own. */
+  credentialsFile?: string | null | undefined;
 }
 
 export function enabledMcpTools(agent: Agent): string[] {
@@ -93,6 +107,22 @@ export function renderConfigToml(input: CodexHomeInput): string {
     'exclude = ["AGENT_TOKEN", "ARK_API_KEY", "LAUNCHPAD_URL"]',
     "",
   ];
+  for (const server of input.integrations ?? []) {
+    lines.push("[mcp_servers." + server.name + "]");
+    if (server.kind === "http") {
+      lines.push("url = " + toml(server.url ?? ""));
+    } else {
+      lines.push("command = " + toml(server.command ?? ""));
+      lines.push("args = [" + server.args.map(toml).join(", ") + "]");
+    }
+    if (server.enabledTools) {
+      lines.push("enabled_tools = [" + server.enabledTools.map(toml).join(", ") + "]");
+    }
+    lines.push('default_tools_approval_mode = "approve"', "startup_timeout_sec = 20", "tool_timeout_sec = 120", "");
+  }
+  if ((input.integrations ?? []).some((server) => server.kind === "http")) {
+    lines.unshift('mcp_oauth_credentials_store = "file"');
+  }
   if (tools.length > 0) {
     lines.push(
       "[mcp_servers." + MCP_SERVER_NAME + "]",
@@ -156,6 +186,11 @@ export async function renderCodexHome(input: CodexHomeInput): Promise<void> {
   await mkdir(path.join(input.dir, "rules"), { recursive: true });
   if (input.config.modelProvider === "local-codex") {
     await linkLocalAuth(input.dir, input.config.localCodexHome);
+  }
+  if (input.credentialsFile) {
+    // Copy (not link): the container runtime cannot follow a host symlink, and
+    // Codex rewrites the file on token refresh.
+    await copyFile(input.credentialsFile, path.join(input.dir, ".credentials.json"));
   }
   await writeFile(path.join(input.dir, "config.toml"), renderConfigToml(input), {
     encoding: "utf8",

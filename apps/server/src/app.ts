@@ -8,6 +8,7 @@ import type { AppConfig } from "./config.js";
 import { HttpError } from "./errors.js";
 import { ACTIONS } from "./types.js";
 import type { AgentService } from "./agent-service.js";
+import type { IntegrationService } from "./integration-service.js";
 import type { RunIdentity } from "./types.js";
 
 const idParams = z.object({ id: z.string().uuid() });
@@ -36,6 +37,9 @@ const updateAgentBody = createAgentBody.partial().refine(
 const messageBody = z.object({
   content: z.string().trim().min(1).max(50_000),
 });
+const agentMessageBody = messageBody.extend({
+  expects_reply: z.boolean().optional(),
+});
 const createChannelBody = z.object({
   name: z.string().trim().min(1).max(60),
   description: z.string().max(500).optional(),
@@ -63,6 +67,15 @@ const spawnBody = z.object({
   task: z.string().max(50_000).optional(),
 });
 const closeBody = z.object({ agentId: z.string().uuid() });
+const integrationBody = z.object({
+  name: z.string().trim().min(1).max(40),
+  kind: z.enum(["http", "stdio"]),
+  url: z.string().url().optional(),
+  command: z.string().trim().min(1).max(500).optional(),
+  args: z.array(z.string().max(500)).max(50).optional(),
+  auth: z.enum(["oauth", "none"]).optional(),
+});
+const agentIntegrationParams = z.object({ id: z.string().uuid(), integrationId: z.string().uuid() });
 const requestPrincipalBody = z.object({
   name: z.string().trim().min(1).max(80),
   description: z.string().max(500).optional(),
@@ -79,7 +92,12 @@ function bearer(request: FastifyRequest): string {
 export async function createApp(
   config: AppConfig,
   service: AgentService,
+  integrations: IntegrationService | null = null,
 ): Promise<FastifyInstance> {
+  const requireIntegrations = (): IntegrationService => {
+    if (!integrations) throw new HttpError(503, "Integrations are not available");
+    return integrations;
+  };
   const app = Fastify({
     logger: {
       level: config.logLevel,
@@ -213,6 +231,47 @@ export async function createApp(
     return { decisions: service.getDecisions(undefined, query.limit) };
   });
 
+  // ------------------------------------------------------------ integrations
+
+  app.get("/api/integrations", async () => ({ integrations: requireIntegrations().list() }));
+
+  app.post("/api/integrations", async (request, reply) => {
+    const body = integrationBody.parse(request.body);
+    return reply.code(201).send({ integration: await requireIntegrations().create(body) });
+  });
+
+  app.delete("/api/integrations/:id", async (request) => {
+    const { id } = idParams.parse(request.params);
+    await requireIntegrations().remove(id);
+    return { ok: true };
+  });
+
+  app.post("/api/integrations/:id/login", async (request) => {
+    const { id } = idParams.parse(request.params);
+    return requireIntegrations().startLogin(id, null);
+  });
+
+  app.post("/api/integrations/:id/logout", async (request) => {
+    const { id } = idParams.parse(request.params);
+    return { integration: await requireIntegrations().logout(id, null) };
+  });
+
+  app.post("/api/integrations/:id/discover", async (request) => {
+    const { id } = idParams.parse(request.params);
+    return { integration: await requireIntegrations().discover(id) };
+  });
+
+  app.post("/api/agents/:id/integrations/:integrationId/login", async (request) => {
+    const { id, integrationId } = agentIntegrationParams.parse(request.params);
+    return requireIntegrations().startLogin(integrationId, service.getAgent(id));
+  });
+
+  app.post("/api/agents/:id/integrations/:integrationId/logout", async (request) => {
+    const { id, integrationId } = agentIntegrationParams.parse(request.params);
+    await requireIntegrations().logout(integrationId, service.getAgent(id));
+    return { agent: service.getAgent(id) };
+  });
+
   app.get("/api/traces/:id", async (request) => {
     const { id } = idParams.parse(request.params);
     return service.getTrace(id);
@@ -252,10 +311,10 @@ export async function createApp(
   app.post("/api/agent/channels/:name/messages", async (request, reply) => {
     const identity = identityOf(request);
     const { name } = nameParams.parse(request.params);
-    const body = messageBody.parse(request.body);
-    return reply
-      .code(201)
-      .send({ message: await service.agentPostMessage(identity, name, body.content) });
+    const body = agentMessageBody.parse(request.body);
+    return reply.code(201).send({
+      message: await service.agentPostMessage(identity, name, body.content, body.expects_reply),
+    });
   });
 
   app.post("/api/agent/channels", async (request, reply) => {

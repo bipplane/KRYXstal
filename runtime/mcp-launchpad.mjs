@@ -34,13 +34,19 @@ const TOOLS = [
   {
     name: "post_message",
     description:
-      "Post a message to a channel as yourself. Mention another agent with @name to wake it.",
+      "Post a message to a channel as yourself. Mention another agent with @name to wake it. " +
+      "If you are asking it something, set expects_reply so its answer wakes you; then end your turn.",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     inputSchema: {
       type: "object",
       properties: {
         channel: { type: "string", description: "Channel name without the leading #" },
         content: { type: "string" },
+        expects_reply: {
+          type: "boolean",
+          description:
+            "True when you need an answer from the agent you mentioned (default: true if the message contains a question mark).",
+        },
       },
       required: ["channel", "content"],
       additionalProperties: false,
@@ -126,7 +132,7 @@ const ROUTES = {
   post_message: (args) => [
     "POST",
     "/api/agent/channels/" + encodeURIComponent(args.channel) + "/messages",
-    { content: args.content },
+    { content: args.content, ...(typeof args.expects_reply === "boolean" ? { expects_reply: args.expects_reply } : {}) },
   ],
   create_channel: (args) => [
     "POST",

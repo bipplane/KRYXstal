@@ -6,6 +6,9 @@ import type {
   Channel,
   ChannelMessage,
   Decision,
+  Integration,
+  IntegrationInput,
+  IntegrationLogin,
   Overview,
   PolicyPresets,
   SystemInfo,
@@ -107,4 +110,35 @@ export const api = {
 
   /** Everything caused by one root message; `messageId` may be any message in the chain. */
   trace: (messageId: string) => request<Trace>("/api/traces/" + encodeURIComponent(messageId)),
+
+  // ---------- integrations (external MCP servers) ----------
+
+  integrations: () => request<{ integrations: Integration[] }>("/api/integrations"),
+  createIntegration: (body: IntegrationInput) =>
+    request<{ integration: Integration }>("/api/integrations", json("POST", body)),
+  deleteIntegration: (id: string) =>
+    request<{ ok: true }>("/api/integrations/" + encodeURIComponent(id), { method: "DELETE" }),
+  /** Starts the shared OAuth login; open `url` in a new tab, then poll the overview for `status`. */
+  integrationLogin: (id: string) =>
+    request<IntegrationLogin>("/api/integrations/" + encodeURIComponent(id) + "/login", { method: "POST" }),
+  integrationLogout: (id: string) =>
+    request<{ integration: Integration }>("/api/integrations/" + encodeURIComponent(id) + "/logout", {
+      method: "POST",
+    }),
+  /** Re-runs tool discovery (tools/list) against the server. */
+  discoverIntegration: (id: string) =>
+    request<{ integration: Integration }>("/api/integrations/" + encodeURIComponent(id) + "/discover", {
+      method: "POST",
+    }),
+  /** Per-agent login: the agent gets its own identity at the provider instead of the shared one. */
+  agentIntegrationLogin: (agentId: string, integrationId: string) =>
+    request<IntegrationLogin>(
+      "/api/agents/" + encodeURIComponent(agentId) + "/integrations/" + encodeURIComponent(integrationId) + "/login",
+      { method: "POST" },
+    ),
+  agentIntegrationLogout: (agentId: string, integrationId: string) =>
+    request<{ agent: Agent }>(
+      "/api/agents/" + encodeURIComponent(agentId) + "/integrations/" + encodeURIComponent(integrationId) + "/logout",
+      { method: "POST" },
+    ),
 };

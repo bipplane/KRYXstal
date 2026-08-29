@@ -4,6 +4,7 @@ import AgentWizard from "./components/AgentWizard";
 import ChannelDialog from "./components/ChannelDialog";
 import ChannelView from "./components/ChannelView";
 import Inspector, { type RunFocus } from "./components/Inspector";
+import IntegrationsPanel from "./components/IntegrationsPanel";
 import Sidebar from "./components/Sidebar";
 import TraceView from "./components/TraceView";
 import { Spinner } from "./components/ui";
@@ -56,6 +57,7 @@ export default function App() {
   const [traceMessageId, setTraceMessageId] = useState<string | null>(null);
   const [wizard, setWizard] = useState<WizardState | null>(null);
   const [channelDialog, setChannelDialog] = useState(false);
+  const [integrationsOpen, setIntegrationsOpen] = useState(false);
   const pickedDefault = useRef(false);
   const missingChannelPolls = useRef(0);
   const missingAgentPolls = useRef(0);
@@ -323,6 +325,7 @@ export default function App() {
           onSelectAgent={selectAgentAndDm}
           onNewAgent={() => setWizard({ mode: "create" })}
           onNewChannel={() => setChannelDialog(true)}
+          onOpenIntegrations={() => setIntegrationsOpen(true)}
         />
         {traceMessageId ? (
           <TraceView
@@ -354,6 +357,7 @@ export default function App() {
           onSelectChannel={selectChannel}
           onSelectAgent={(agent) => setSelectedAgentId(agent.id)}
           onClear={() => setSelectedAgentId(null)}
+          onRefresh={refreshOverview}
         />
       </div>
 
@@ -364,6 +368,7 @@ export default function App() {
           agent={wizard.mode === "edit" ? wizard.agent : undefined}
           presets={presets}
           channels={nonDmChannels}
+          integrations={overview?.integrations ?? []}
           initialChannelIds={
             wizard.mode === "edit"
               ? nonDmChannels.filter((c) => c.memberIds.includes(wizard.agent.id)).map((c) => c.id)
@@ -376,6 +381,14 @@ export default function App() {
 
       {channelDialog ? (
         <ChannelDialog agents={overview?.agents ?? []} onClose={() => setChannelDialog(false)} onSubmit={submitChannel} />
+      ) : null}
+
+      {integrationsOpen ? (
+        <IntegrationsPanel
+          integrations={overview?.integrations ?? []}
+          onClose={() => setIntegrationsOpen(false)}
+          onRefresh={refreshOverview}
+        />
       ) : null}
     </div>
   );

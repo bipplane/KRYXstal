@@ -5,11 +5,13 @@ import {
   type AgentInput,
   type Channel,
   type Effect,
+  type Integration,
   type Policy,
   type PolicyPreset,
   type PolicyPresets,
   type Statement,
 } from "../types";
+import { globMatch, isMcpAction, isUsableIntegration, mcpAction, mcpAll, toolAccess } from "../mcp";
 import { ErrorNote, Modal, Tag } from "./ui";
 
 type PresetName = Exclude<PolicyPreset, "custom">;
@@ -35,6 +37,7 @@ interface AgentWizardProps {
   agent?: Agent;
   presets: PolicyPresets | null;
   channels: Channel[];
+  integrations: Integration[];
   initialChannelIds: string[];
   onClose: () => void;
   onSubmit: (input: AgentInput) => Promise<void>;
@@ -65,11 +68,56 @@ function fromRows(rows: StatementRow[]): Statement[] {
     .filter((s) => s.actions.length > 0 || s.resources.length > 0);
 }
 
+// ---------- integration tools <-> statement rows ----------
+
+/** The allow-row action pattern that grants `action` on resource `*`, if any. */
+function grantedBy(rows: StatementRow[], action: string): string | null {
+  for (const row of rows) {
+    if (row.effect !== "allow") continue;
+    if (!splitList(row.resources).some((r) => globMatch(r, "*"))) continue;
+    const hit = splitList(row.actions).find((pattern) => globMatch(pattern, action));
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/** Drops the exact actions from every allow row; rows we empty out are removed. */
+function withoutActions(rows: StatementRow[], actions: Set<string>): StatementRow[] {
+  const next: StatementRow[] = [];
+  for (const row of rows) {
+    if (row.effect !== "allow") {
+      next.push(row);
+      continue;
+    }
+    const before = splitList(row.actions);
+    const kept = before.filter((a) => !actions.has(a));
+    if (kept.length === before.length) next.push(row);
+    else if (kept.length > 0) next.push({ ...row, actions: kept.join(", ") });
+  }
+  return next;
+}
+
+/** Adds actions to the mcp-only allow row on `*`, creating it when there is none. */
+function withActions(rows: StatementRow[], actions: string[]): StatementRow[] {
+  const index = rows.findIndex((row) => {
+    if (row.effect !== "allow" || splitList(row.resources).join(",") !== "*") return false;
+    const existing = splitList(row.actions);
+    return existing.length > 0 && existing.every(isMcpAction);
+  });
+  if (index < 0) {
+    return [...rows, { key: nextKey(), effect: "allow", actions: actions.join(", "), resources: "*" }];
+  }
+  const existing = splitList(rows[index].actions);
+  const merged = [...existing, ...actions.filter((a) => !existing.includes(a))];
+  return rows.map((row, i) => (i === index ? { ...row, actions: merged.join(", ") } : row));
+}
+
 export default function AgentWizard({
   mode,
   agent,
   presets,
   channels,
+  integrations,
   initialChannelIds,
   onClose,
   onSubmit,
@@ -133,6 +181,46 @@ export default function AgentWizard({
   const toggleChannel = (id: string) => {
     setChannelIds((prev) => (prev.includes(id) ? prev.filter((c) => c !== id) : [...prev, id]));
   };
+
+  // Integration tool checkboxes are a view over the statement rows, so they stay in sync with the table.
+  const usableIntegrations = integrations.filter(isUsableIntegration);
+  const statements = useMemo(() => fromRows(rows), [rows]);
+
+  const toggleTool = (integration: Integration, tool: string) => {
+    const action = mcpAction(integration.name, tool);
+    const all = mcpAll(integration.name);
+    setRows((prev) => {
+      const by = grantedBy(prev, action);
+      if (by === action) return withoutActions(prev, new Set([action]));
+      if (by === all) {
+        // Expand the wildcard into the remaining tools so only this one is dropped.
+        const others = integration.tools.filter((t) => t.name !== tool).map((t) => mcpAction(integration.name, t.name));
+        const next = withoutActions(prev, new Set([all]));
+        return others.length > 0 ? withActions(next, others) : next;
+      }
+      if (by) return prev; // granted by a broader pattern: edit that statement instead
+      return withActions(prev, [action]);
+    });
+    markCustom();
+  };
+
+  const toggleAllTools = (integration: Integration) => {
+    const all = mcpAll(integration.name);
+    const toolActions = integration.tools.map((t) => mcpAction(integration.name, t.name));
+    setRows((prev) => {
+      const by = grantedBy(prev, all);
+      const explicitAll = prev.some((r) => r.effect === "allow" && splitList(r.actions).includes(all));
+      const everyTool = toolActions.length > 0 && toolActions.every((a) => grantedBy(prev, a) === a);
+      if (explicitAll || everyTool) return withoutActions(prev, new Set([all, ...toolActions]));
+      if (by) return prev; // granted by a broader pattern
+      return withActions(withoutActions(prev, new Set(toolActions)), [all]);
+    });
+    markCustom();
+  };
+
+  const mcpGrants = rows
+    .filter((row) => splitList(row.actions).some(isMcpAction))
+    .map((row) => ({ key: row.key, effect: row.effect, actions: splitList(row.actions).filter(isMcpAction), resources: row.resources }));
 
   const nameValid = name.trim().length > 0;
 
@@ -272,6 +360,66 @@ export default function AgentWizard({
                 <span className="preset-blurb">Hand-edited statements. Selected automatically when you change anything below.</span>
               </label>
             </div>
+          </div>
+
+          <div className="field">
+            <span className="field-label">Integrations</span>
+            <div className="muted small">
+              Tools from connected MCP servers this agent may call. Each becomes an <code>allow</code> on{" "}
+              <code>mcp:&lt;integration&gt;:&lt;tool&gt;</code>.
+            </div>
+            {usableIntegrations.length === 0 ? (
+              <div className="grant-preview muted small">
+                No connected integrations. Add and connect one from the sidebar first.
+              </div>
+            ) : (
+              <ul className="integ-pick-list">
+                {usableIntegrations.map((integration) => {
+                  const all = mcpAll(integration.name);
+                  const allBy = grantedBy(rows, all);
+                  const allLocked = allBy !== null && allBy !== all;
+                  const everyTool =
+                    integration.tools.length > 0 &&
+                    integration.tools.every((t) => grantedBy(rows, mcpAction(integration.name, t.name)) !== null);
+                  const allChecked = allBy !== null || everyTool;
+                  return (
+                    <li key={integration.id} className="integ-pick">
+                      <label className="check-item integ-pick-head" title={allLocked ? "Granted by " + allBy + " — edit it in the statements table" : undefined}>
+                        <input type="checkbox" checked={allChecked} disabled={allLocked} onChange={() => toggleAllTools(integration)} />
+                        <span className="integ-name">{integration.name}</span>
+                        <Tag>{integration.kind}</Tag>
+                        <span className="muted small">
+                          all tools{allLocked ? " · via " : ""}
+                          {allLocked ? <code>{allBy}</code> : null}
+                        </span>
+                      </label>
+                      {integration.tools.length === 0 ? (
+                        <div className="muted small integ-pick-empty">No tools discovered yet.</div>
+                      ) : (
+                        <ul className="check-list check-list-grid integ-pick-tools">
+                          {integration.tools.map((tool) => {
+                            const action = mcpAction(integration.name, tool.name);
+                            const by = grantedBy(rows, action);
+                            const locked = by !== null && by !== action && by !== all;
+                            const denied = toolAccess(statements, integration, tool) === "deny";
+                            return (
+                              <li key={tool.name}>
+                                <label className="check-item" title={locked ? "Granted by " + by + " — edit it in the statements table" : undefined}>
+                                  <input type="checkbox" checked={by !== null} disabled={locked} onChange={() => toggleTool(integration, tool.name)} />
+                                  <code>{tool.name}</code>
+                                  {tool.readOnly ? <Tag>read-only</Tag> : null}
+                                  {denied ? <Tag tone="red">denied</Tag> : null}
+                                </label>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
           </div>
 
           <div className="field">
@@ -423,6 +571,23 @@ export default function AgentWizard({
                     <code>channel:read, channel:post</code>
                     <span className="muted">on</span>
                     <code>channel:{channel.name}</code>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+          <div className="field">
+            <span className="field-label">Integration tools</span>
+            {mcpGrants.length === 0 ? (
+              <div className="grant-preview muted small">No integration tools granted.</div>
+            ) : (
+              <ul className="grant-list grant-preview">
+                {mcpGrants.map((grant) => (
+                  <li key={grant.key} className={"grant grant-" + grant.effect}>
+                    <span className={"effect effect-" + grant.effect}>{grant.effect}</span>
+                    <code>{grant.actions.join(", ")}</code>
+                    <span className="muted">on</span>
+                    <code>{grant.resources || "—"}</code>
                   </li>
                 ))}
               </ul>

@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import type { AgentStatus, AuthorKind, Effect, RunStatus } from "../types";
+import type { AgentStatus, AuthorKind, Effect, IntegrationStatus, RunStatus } from "../types";
 
 // ---------- time helpers ----------
 
@@ -56,7 +56,7 @@ export function truncate(text: string, max = 160): string {
 
 // ---------- primitives ----------
 
-export function StatusPill({ status }: { status: AgentStatus | RunStatus }) {
+export function StatusPill({ status }: { status: AgentStatus | RunStatus | IntegrationStatus }) {
   return (
     <span className={"pill pill-" + status}>
       <span className="pill-dot" />

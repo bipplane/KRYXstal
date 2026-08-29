@@ -40,6 +40,7 @@ import type {
   UpdateAgentInput,
 } from "./types.js";
 import { WorkspaceManager, type InstructionContext } from "./workspace.js";
+import type { IntegrationService } from "./integration-service.js";
 
 const now = () => new Date().toISOString();
 
@@ -81,6 +82,8 @@ export interface RequestPrincipalInput {
 interface RunOptions {
   trigger: AgentRun["trigger"];
   channelId: string | null;
+  /** Where the final reply goes; defaults to channelId. */
+  replyChannelId?: string | null | undefined;
   prompt: string;
   traceId: string | null;
   triggerMessageId: string | null;
@@ -106,6 +109,7 @@ export class AgentService {
     private readonly store: JsonStore,
     private readonly workspaces: WorkspaceManager,
     private readonly runner: AgentRunner,
+    private readonly integrations: IntegrationService | null = null,
   ) {}
 
   // ---------------------------------------------------------------- lifecycle
@@ -135,8 +139,11 @@ export class AgentService {
       for (const run of database.runs) {
         run.traceId ??= null;
         run.triggerMessageId ??= null;
+        run.replyChannelId ??= run.channelId;
       }
       for (const decision of database.decisions) decision.traceId ??= null;
+      database.integrations ??= [];
+      for (const agent of database.agents) agent.ownIntegrationIds ??= [];
       this.ensureSystemChannels(database);
       for (const agent of database.agents) {
         if (!agent.dmChannelId) {
@@ -200,6 +207,7 @@ export class AgentService {
     agents: Agent[];
     channels: Channel[];
     approvals: ApprovalRequest[];
+    integrations: Database["integrations"];
   } {
     const database = this.store.snapshot();
     return {
@@ -207,6 +215,7 @@ export class AgentService {
       agents: database.agents.sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
       channels: database.channels.filter((channel) => !channel.archivedAt),
       approvals: database.approvals.filter((approval) => approval.status === "pending"),
+      integrations: database.integrations,
     };
   }
 
@@ -323,6 +332,7 @@ export class AgentService {
     const agent: Agent = {
       id,
       kind: "principal",
+      ownIntegrationIds: [],
       name: input.name.trim(),
       description: input.description?.trim() ?? "",
       instructions: input.instructions?.trim() ?? "",
@@ -760,6 +770,7 @@ export class AgentService {
     identity: RunIdentity,
     channelName: string,
     content: string,
+    expectsReply?: boolean | undefined,
   ): Promise<ChannelMessage> {
     const agent = this.getAgent(identity.agentId);
     const channel = this.getChannelByName(channelName);
@@ -773,6 +784,7 @@ export class AgentService {
         content,
         runId: identity.runId,
         approvalId: null,
+        ...(expectsReply === undefined ? {} : { expectsReply }),
         ...this.traceOfRun(identity.runId),
       }),
     );
@@ -831,6 +843,7 @@ export class AgentService {
     const session: Agent = {
       id,
       kind: "session",
+      ownIntegrationIds: [],
       name: parent.name + "/" + input.name.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-"),
       description: "Session spawned by " + parent.name,
       instructions: input.instructions.trim(),
@@ -1119,17 +1132,42 @@ export class AgentService {
         return;
       }
     }
-    for (const memberId of channel.memberIds) {
+    // A reply to a mention wakes the mentioner: if the message that woke this
+    // author @mentioned it, the author of that message is waiting for an answer.
+    const parent = message.parentMessageId
+      ? database.messages.find((item) => item.id === message.parentMessageId)
+      : undefined;
+    const asker =
+      parent && parent.authorId !== USER_ID && parent.authorId !== message.authorId
+        ? database.agents.find((item) => item.id === parent.authorId)
+        : undefined;
+    const askerAddressed =
+      asker !== undefined &&
+      parent !== undefined &&
+      mentions(parent.content, message.authorName, database.agents) &&
+      (parent.expectsReply ?? parent.content.includes("?"));
+    const recipients = new Set(channel.memberIds);
+    if (askerAddressed && asker) recipients.add(asker.id);
+    for (const memberId of recipients) {
       if (memberId === USER_ID || memberId === message.authorId) continue;
       const agent = database.agents.find((item) => item.id === memberId);
       if (!agent || agent.status === "stopped" || agent.status === "closed") continue;
       const addressed =
-        force || channel.kind === "dm" || mentions(message.content, agent.name, database.agents);
+        force ||
+        channel.kind === "dm" ||
+        mentions(message.content, agent.name, database.agents) ||
+        (askerAddressed && agent.id === asker?.id);
       if (!addressed) continue;
       if (evaluate(agent.policy, "channel:read", "channel:" + channel.name).effect !== "allow") {
         continue;
       }
-      await this.queueTurn(agent.id, channelId, message);
+      // Woken by an answer to its own question: reply where it was originally asked.
+      let replyChannelId: string | null = null;
+      if (askerAddressed && asker && agent.id === asker.id && parent?.runId) {
+        const askingRun = database.runs.find((run) => run.id === parent.runId);
+        replyChannelId = askingRun?.replyChannelId ?? askingRun?.channelId ?? null;
+      }
+      await this.queueTurn(agent.id, channelId, message, replyChannelId);
     }
   }
 
@@ -1169,6 +1207,7 @@ export class AgentService {
     agentId: string,
     channelId: string,
     trigger: ChannelMessage,
+    replyChannelId: string | null = null,
   ): Promise<void> {
     if (!isModelConfigured(this.config)) return;
     if (trigger.authorKind !== "user" && (await this.traceExhausted(trigger, channelId))) return;
@@ -1177,12 +1216,13 @@ export class AgentService {
       this.deferWake(agentId, channelId, trigger.id);
       return;
     }
-    const prompt = this.buildChannelPrompt(agent, channelId, trigger);
+    const prompt = this.buildChannelPrompt(agent, channelId, trigger, replyChannelId);
     if (!prompt) return;
     try {
       await this.startRun(agent, {
         trigger: "channel",
         channelId,
+        replyChannelId,
         prompt,
         traceId: trigger.traceId,
         triggerMessageId: trigger.id,
@@ -1197,6 +1237,7 @@ export class AgentService {
     agent: Agent,
     channelId: string,
     trigger?: ChannelMessage | undefined,
+    replyChannelId: string | null = null,
   ): string | null {
     const database = this.store.peek();
     const channel = database.channels.find((item) => item.id === channelId);
@@ -1246,18 +1287,25 @@ export class AgentService {
       }
       if (trigger.authorKind !== "user") {
         chain.push(
-          "The latest message is from another agent, not the human. If the original request is already resolved, reply in one short line without @mentioning anyone (or say nothing new). Only @mention an agent when you need a reply or an action from it; otherwise write its plain name.",
+          "The latest message is from another agent, not the human. If the original request is already resolved, reply in one short line without @mentioning anyone (or say nothing new). @mention an agent only when you need a reply or an action from it; answers and acknowledgements need no mention — an answer is routed back to whoever asked automatically.",
         );
       }
     }
+    const replyChannel = replyChannelId
+      ? database.channels.find((item) => item.id === replyChannelId)
+      : undefined;
+    const destination = replyChannel && replyChannel.id !== channel.id
+      ? (replyChannel.kind === "dm" ? "your DM with " + (replyChannel.memberIds.includes(USER_ID) ? this.config.userName : "the requester") : "#" + replyChannel.name) +
+        " (where you were originally asked)"
+      : "#" + channel.name;
     return [
       "New messages in #" + channel.name + " addressed to you:",
       "",
       ...lines,
       "",
       ...(chain.length > 0 ? [...chain, ""] : []),
-      "Respond to these messages. Your reply is posted to #" +
-        channel.name +
+      "Respond to these messages. Your reply is posted to " +
+        destination +
         " automatically; use the launchpad tools only to act elsewhere or coordinate with other agents.",
     ].join("\n");
   }
@@ -1272,6 +1320,7 @@ export class AgentService {
       status: "queued",
       trigger: options.trigger,
       channelId: options.channelId,
+      replyChannelId: options.replyChannelId ?? options.channelId,
       traceId: options.traceId,
       triggerMessageId: options.triggerMessageId,
       prompt: options.prompt,
@@ -1327,6 +1376,15 @@ export class AgentService {
         config: this.config,
         agent: agentAtStart,
         scriptsDir: runtimeScriptsDirForCodex(this.config),
+        integrations: this.integrations?.forAgent(agentAtStart).map((entry) => ({
+          name: entry.integration.name,
+          kind: entry.integration.kind,
+          url: entry.integration.url,
+          command: entry.integration.command,
+          args: entry.integration.args,
+          enabledTools: entry.enabledTools,
+        })),
+        credentialsFile: (await this.integrations?.credentialsFor(agentAtStart)) ?? null,
       });
       await this.workspaces.writeInstructions(agentAtStart, this.instructionContext(agentAtStart));
       const result = await this.runner.run({
@@ -1356,7 +1414,7 @@ export class AgentService {
         agent.codexThreadId = result.threadId;
         agent.lastError = null;
         agent.updatedAt = completedAt;
-        const channelId = run.channelId ?? agent.dmChannelId;
+        const channelId = run.replyChannelId ?? run.channelId ?? agent.dmChannelId;
         if (!channelId) return null;
         return this.appendMessage(database, channelId, {
           authorId: agent.id,
@@ -1388,7 +1446,7 @@ export class AgentService {
           if (agent.status === "busy") agent.status = cancelled ? "ready" : "error";
           agent.lastError = cancelled ? null : message;
           agent.updatedAt = completedAt;
-          const channelId = run.channelId ?? agent.dmChannelId;
+          const channelId = run.replyChannelId ?? run.channelId ?? agent.dmChannelId;
           if (channelId && !cancelled) {
             this.appendMessage(database, channelId, {
               authorId: "system",

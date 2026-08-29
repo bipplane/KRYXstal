@@ -34,6 +34,7 @@ export interface Policy {
 export interface Agent {
   id: string;
   kind: AgentKind;
+  ownIntegrationIds: string[];
   name: string;
   description: string;
   instructions: string;
@@ -80,6 +81,8 @@ export interface ChannelMessage {
   traceId: string;
   /** Message that directly caused this one (the one that woke the run), null for roots. */
   parentMessageId: string | null;
+  /** When set, whether the author expects an answer; otherwise inferred from a trailing "?". */
+  expectsReply?: boolean | undefined;
   createdAt: string;
 }
 
@@ -126,7 +129,10 @@ export interface AgentRun {
   agentId: string;
   status: RunStatus;
   trigger: "user" | "channel" | "spawn";
+  /** Channel whose message woke this run. */
   channelId: string | null;
+  /** Channel the final reply is posted to (differs from channelId when answering back to where the agent was originally asked). */
+  replyChannelId: string | null;
   traceId: string | null;
   /** Message whose arrival woke this run. */
   triggerMessageId: string | null;
@@ -174,6 +180,7 @@ export interface Trace {
 export interface Database {
   version: 2;
   agents: Agent[];
+  integrations: Integration[];
   channels: Channel[];
   messages: ChannelMessage[];
   runs: AgentRun[];
@@ -229,4 +236,51 @@ export interface RunIdentity {
   agentId: string;
   runId: string;
   expiresAt: number;
+}
+
+// ---------- integrations (external MCP servers) ----------
+
+export type IntegrationKind = "http" | "stdio";
+export type IntegrationAuth = "oauth" | "none";
+export type IntegrationStatus = "unconnected" | "connecting" | "connected" | "error";
+
+export interface IntegrationTool {
+  name: string;
+  description: string;
+  readOnly: boolean;
+}
+
+/** An external MCP server registered by the human. Tools become IAM actions `mcp:<name>:<tool>`. */
+export interface Integration {
+  id: string;
+  /** Slug used as the Codex MCP server name and in action names. */
+  name: string;
+  kind: IntegrationKind;
+  url: string | null;
+  command: string | null;
+  args: string[];
+  auth: IntegrationAuth;
+  status: IntegrationStatus;
+  /** Discovered via tools/list after connecting; empty until then. */
+  tools: IntegrationTool[];
+  lastError: string | null;
+  connectedAt: string | null;
+  createdAt: string;
+}
+
+export interface IntegrationInput {
+  name: string;
+  kind: IntegrationKind;
+  url?: string | undefined;
+  command?: string | undefined;
+  args?: string[] | undefined;
+  auth?: IntegrationAuth | undefined;
+}
+
+/** Result of starting an OAuth login: open `url` in a browser, then poll the integration status. */
+export interface IntegrationLogin {
+  integrationId: string;
+  /** Agent id when this is a per-agent login, null for the shared login. */
+  agentId: string | null;
+  url: string;
 }

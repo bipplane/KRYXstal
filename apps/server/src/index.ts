@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { AgentService } from "./agent-service.js";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
+import { IntegrationService } from "./integration-service.js";
 import { createRunner } from "./runner-factory.js";
 import { JsonStore } from "./store.js";
 import { WorkspaceManager } from "./workspace.js";
@@ -24,10 +25,12 @@ const config = loadConfig();
 const store = new JsonStore(path.join(config.dataDirectory, "launchpad.json"));
 const workspaces = new WorkspaceManager(config.workspaceRoot);
 const runner = createRunner(config);
-const service = new AgentService(config, store, workspaces, runner);
+const integrations = new IntegrationService(config, store);
+const service = new AgentService(config, store, workspaces, runner, integrations);
 await service.initialize();
+await integrations.initialize();
 
-const app = await createApp(config, service);
+const app = await createApp(config, service, integrations);
 
 const shutdown = async (signal: string) => {
   app.log.info({ signal }, "Shutting down");

@@ -104,6 +104,23 @@ describe("Per-agent $CODEX_HOME", () => {
     ).rejects.toThrow("codex login");
   });
 
+  it("renders external MCP servers with per-agent tool allowlists", () => {
+    const toml = renderConfigToml({
+      dir: "/x",
+      config,
+      agent: agent("worker"),
+      scriptsDir: "/o",
+      integrations: [
+        { name: "linear", kind: "http", url: "https://mcp.linear.app/mcp", command: null, args: [], enabledTools: ["list_issues"] },
+        { name: "local", kind: "stdio", url: null, command: "node", args: ["srv.mjs"], enabledTools: null },
+      ],
+    });
+    expect(toml.startsWith('mcp_oauth_credentials_store = "file"')).toBe(true);
+    expect(toml).toContain("[mcp_servers.linear]\nurl = \"https://mcp.linear.app/mcp\"\nenabled_tools = [\"list_issues\"]");
+    expect(toml).toContain("[mcp_servers.local]\ncommand = \"node\"\nargs = [\"srv.mjs\"]\ndefault_tools_approval_mode");
+    expect(toml).not.toContain("[mcp_servers.local]\ncommand = \"node\"\nargs = [\"srv.mjs\"]\nenabled_tools");
+  });
+
   it("writes config, rules and hooks files", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "codex-home-"));
     temporaryDirectories.push(dir);

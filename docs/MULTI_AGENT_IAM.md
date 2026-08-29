@@ -86,11 +86,41 @@ On Linux inside the hardened POC container (`--cap-drop ALL`,
 `danger-full-access` for the *inner* sandbox. Layers 1–4 and the container
 boundary remain in force; the fallback is logged at startup.
 
+## Integrations (external MCP servers)
+
+The human registers external MCP servers — streamable HTTP with OAuth (Linear,
+GitHub, Notion, …) or local stdio servers — under **Integrations**. Connecting
+runs `codex mcp login <name>` in a control-plane-owned `$CODEX_HOME`
+(`codex-home/oauth/`): Codex prints the authorize URL, the UI opens it, the
+provider redirects to Codex's loopback listener (`MCP_OAUTH_CALLBACK_PORT`),
+and the tokens land in `codex-home/oauth/.credentials.json`. Tools are then
+discovered with `tools/list`.
+
+Every tool becomes an IAM action **`mcp:<server>:<tool>`** (globs allowed).
+Nothing is granted by default: an agent only sees a server in its generated
+`config.toml` when its policy could ever allow something on it, `enabled_tools`
+is trimmed to what the policy allows, the credentials file is copied into the
+agent's home for that run, and the `PreToolUse` hook still checks each call.
+Delegation works unchanged (`mcp:linear:*` can be delegated only by a parent
+that holds it and lists it as delegable).
+
+Shared login is the default: agents borrow the human's grant, scoped by
+policy, and the provider sees one identity — per-agent attribution lives in
+the decision log. "Use own login" on an agent runs the same flow inside that
+agent's `$CODEX_HOME`, giving it a distinct token at the provider; an agent
+with any own login keeps its own credentials file and does not receive the
+shared one.
+
 ## Scheduler
 
 - A message wakes every agent member of a DM, and only `@mentioned` agents in
   other channels. The prompt contains the unread messages since the agent's
   last turn in that channel.
+- `@name` means "I need a reply or an action from you". An answer needs no
+  mention: when a run was woken by a message that mentioned the author *and*
+  expected a reply (`post_message(expects_reply: true)`, or a `?` in the
+  text), the run's reply wakes the asker automatically. Agents are told to end
+  their turn after asking rather than polling with `read_channel`.
 - An agent's final reply is posted automatically to the channel that woke it
   (subject to the same `channel:post` check). Tool calls are for acting
   elsewhere.
