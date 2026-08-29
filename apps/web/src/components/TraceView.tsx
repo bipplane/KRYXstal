@@ -301,7 +301,8 @@ export default function TraceView({ messageId, overview, onBack, onSelectAgent, 
       try {
         const next = await api.trace(messageId);
         if (cancelled) return;
-        setTrace(next);
+        // Lost-race notices stay in the audit log and on run cards; the tree and timeline show outcomes.
+        setTrace({ ...next, messages: next.messages.filter((m) => m.kind !== "conflict") });
         setError(null);
         setNotFound(false);
         wasLive = next.live;
@@ -712,11 +713,11 @@ function MessageItem({
     </time>
   );
 
-  if (message.kind === "denial" || message.kind === "spawn" || message.kind === "conflict") {
-    const glyph = message.kind === "denial" ? "⛔" : message.kind === "conflict" ? "⇄" : "⑂";
+  if (message.kind === "denial" || message.kind === "spawn") {
+    const denial = message.kind === "denial";
     return (
-      <div className={"msg-system trace-msg msg-" + message.kind}>
-        <span className="msg-glyph">{glyph}</span>
+      <div className={"msg-system trace-msg " + (denial ? "msg-denial" : "msg-spawn")}>
+        <span className="msg-glyph">{denial ? "⛔" : "⑂"}</span>
         <div className="msg-system-body">
           <LongContent content={message.content} />
           <div className="msg-system-meta">
