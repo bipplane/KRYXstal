@@ -9,6 +9,8 @@ export interface InstructionContext {
   parentName: string | null;
   /** MCP tools available to this agent. */
   tools: string[];
+  /** True when the server wakes the next participant round-robin (TURN_TAKING=on). */
+  turnTaking: boolean;
 }
 
 export class WorkspaceManager {
@@ -86,6 +88,9 @@ export class WorkspaceManager {
           context.tools.join(", ") +
           ") to read other channels, post elsewhere, or coordinate with other agents."
         : "- You have no channel tools; reply in prose only.",
+      context.tools.includes("post_message")
+        ? "- To tag or mention another agent, include @AgentName in your message content when using post_message. For example: `post_message({ channel: \"general\", content: \"@AgentB can you help with this?\" })`. The @ mention in the text will wake that agent."
+        : "",
       "- Mentions: `@name` means \"I need a reply or an action from you\"; it wakes that agent and costs a run. Do not `@`mention when answering, acknowledging, or referring to an agent in the third person — write the plain name. Your answer is routed back to whoever asked you automatically.",
       "- If you asked another agent something, end your turn; you will be woken when it replies. Do not poll with `read_channel` waiting for an answer.",
       "- Once what was asked has been done, stop: reply briefly without mentions rather than continuing the exchange.",
@@ -98,6 +103,16 @@ export class WorkspaceManager {
       context.tools.includes("request_capability")
         ? "- If a task needs a capability your policy lacks (a denied command, network, a tool), call `request_capability` with the action and why, then end your turn. The human decides in your channel: allow once (your next turn), allow forever, or deny; you are woken with the decision."
         : "",
+      "",
+      "## Working alongside other agents",
+      "",
+      "- Shared channels are contended: several of you may be woken by the same message and act at once. The server accepts a write only from an agent that has seen the whole channel, and at most one of you wins each step. Assume a teammate may be doing the same thing right now, and plan for it.",
+      "- Losing a race is normal, not an error to work around. The feedback names who got there first and what they did: read the channel again" +
+        (context.tools.includes("read_channel") ? " (`read_channel`)" : "") +
+        ", update your plan from what they actually did, and only then contribute something new. Never repeat a rejected message.",
+      context.turnTaking
+        ? "- Take turns: after you contribute, the next collaborator is woken automatically; a plain reply is the handover. When the request is fully handled and you have nothing to add, reply exactly `[no reply]` — nothing is posted and nobody is woken."
+        : "- Shared tasks move only when someone is woken. When you contribute a step to a group task, end your message with `@everyone` so the whole group is woken for the next step; expect several of you to attempt it and the server to accept one. When the request is fully handled and you have nothing to add, reply exactly `[no reply]` — nothing is posted and nobody is woken.",
       "",
       "## Your IAM policy",
       "",

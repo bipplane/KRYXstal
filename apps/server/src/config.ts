@@ -58,6 +58,16 @@ const envSchema = z.object({
     .string()
     .url()
     .default("https://ark.cn-beijing.volces.com/api/v3"),
+  /** Agent-to-agent turns allowed in one channel before a human has to speak again. */
+  CHATTER_BUDGET: z.coerce.number().int().min(1).default(64),
+  /** Agent runs one human prompt may cause in total (across channels) before pausing. */
+  TRACE_BUDGET: z.coerce.number().int().min(1).default(64),
+  /**
+   * `off` (default): agents wake only when mentioned; collaborators end each
+   * contribution with @everyone. `on`: an agent's message in a collaboration
+   * also wakes the next participant round-robin, and a silent turn passes.
+   */
+  TURN_TAKING: z.enum(["on", "off"]).default("off"),
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
 });
 
@@ -121,6 +131,9 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
     arkApiKey: env.ARK_API_KEY?.trim() ?? "",
     arkModel: env.ARK_MODEL?.trim() ?? "",
     arkBaseUrl: env.ARK_BASE_URL.replace(/\/+$/, ""),
+    chatterBudget: env.CHATTER_BUDGET,
+    traceBudget: env.TRACE_BUDGET,
+    turnTaking: env.TURN_TAKING === "on",
     nodeEnv: env.NODE_ENV,
   };
 }

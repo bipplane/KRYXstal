@@ -221,7 +221,9 @@ describe("IAM enforcement", () => {
     expect(service.getChannel(deploys.id).memberIds).not.toContain(agent.id);
     const decisions = service.getDecisions();
     expect(decisions.filter((decision) => decision.effect === "deny")).toHaveLength(2);
-    expect(decisions[0]).toMatchObject({ effect: "allow", tool: "post_message", source: "api" });
+    // The accepted post leaves two rows: the IAM allow, then the read-before-act allow.
+    expect(decisions[1]).toMatchObject({ effect: "allow", tool: "post_message", source: "api" });
+    expect(decisions[0]).toMatchObject({ effect: "allow", tool: "post_message", source: "sync" });
   });
 });
 
@@ -349,7 +351,7 @@ describe("Traces", () => {
       cancel: async () => false,
       isAvailable: async () => true,
     };
-    ({ service } = await makeService(runner));
+    ({ service } = await makeService(runner, { TRACE_BUDGET: "6" }));
     const test = await service.createChannel({ name: "test" });
     const a = await service.createAgent({ name: "AgentA", channelIds: [test.id] });
     const b = await service.createAgent({ name: "AgentB", channelIds: [test.id] });
@@ -379,8 +381,14 @@ describe("Traces", () => {
     expect(trace.runs.map((run) => run.agentId)).toEqual([a.id, b.id]);
     expect(trace.runs[0]?.triggerMessageId).toBe(root.id);
     expect(trace.runs[1]?.triggerMessageId).toBe(aPost?.id);
-    expect(trace.decisions.map((d) => d.tool)).toEqual(["post_message"]);
-    expect(trace.decisions[0]?.traceId).toBe(root.id);
+    expect(trace.decisions.filter((d) => d.source === "api").map((d) => d.tool)).toEqual(["post_message"]);
+    // Every channel write, tool or automatic, also leaves a read-before-act row.
+    expect(trace.decisions.filter((d) => d.source === "sync").map((d) => d.tool + ":" + d.effect)).toEqual([
+      "post_message:allow",
+      "auto_post:allow",
+      "auto_post:allow",
+    ]);
+    expect(trace.decisions.every((d) => d.traceId === root.id)).toBe(true);
     expect(trace.agents.map((agent) => agent.name).sort()).toEqual(["AgentA", "AgentB"]);
     // The human-triggered run gets no chain context; the agent-triggered one does.
     expect(prompts[0]).not.toContain("Chain context");
@@ -405,7 +413,7 @@ describe("Trace budget", () => {
       cancel: async () => false,
       isAvailable: async () => true,
     };
-    ({ service } = await makeService(runner));
+    ({ service } = await makeService(runner, { TRACE_BUDGET: "6" }));
     await service.createAgent({ name: "Ping" });
     await service.createAgent({ name: "Pong" });
     const general = service.getChannelByName("general");

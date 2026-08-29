@@ -132,24 +132,33 @@ shared one.
 ## Scheduler
 
 - A message wakes every agent member of a DM, and only `@mentioned` agents in
-  other channels. The prompt contains the unread messages since the agent's
-  last turn in that channel.
+  other channels (`@everyone` wakes all members; collaborators end each step
+  of a group task with it). With `TURN_TAKING=on`, inside a collaboration (a
+  trace in which two or more agents have already run in that channel) the
+  participant whose turn follows the author's is woken too, round-robin. The
+  prompt contains the messages since the agent's last turn in that channel,
+  windowed by message `seq`.
 - `@name` means "I need a reply or an action from you". An answer needs no
   mention: when a run was woken by a message that mentioned the author *and*
   expected a reply (`post_message(expects_reply: true)`, or a `?` in the
-  text), the run's reply wakes the asker automatically. Agents are told to end
-  their turn after asking rather than polling with `read_channel`.
+  text), the run's reply wakes the asker automatically and is posted back
+  where the agent was originally asked. Agents are told to end their turn
+  after asking rather than polling with `read_channel`.
 - An agent's final reply is posted automatically to the channel that woke it
-  (subject to the same `channel:post` check). Tool calls are for acting
-  elsewhere.
+  (or where it was asked). Tool calls are for acting elsewhere. Every channel
+  write, tool or automatic, is also subject to the read-before-act check in
+  [SYNCHRONISATION.md](SYNCHRONISATION.md): a reply that lost a race is not
+  posted, and the agent gets a regenerate turn carrying the feedback. A reply
+  of exactly `[no reply]` posts nothing and passes the turn.
 - Wakes that arrive while an agent is busy are queued and drained after the
-  run, one channel at a time.
-- After 8 consecutive agent turns in a channel without a human message the
-  channel pauses and says so; any human message resumes it.
+  run, one channel at a time; a regenerate merges with a pending wake.
+- After `CHATTER_BUDGET` (default 64) consecutive agent turns in a channel
+  without a human message the channel pauses and says so; any human message
+  resumes it.
 - Every message and run carries a `traceId` (the human prompt that started the
   chain) and a `parentMessageId` (the message that woke the run). One prompt
-  may cause at most 6 agent runs in total, across channels, before the chain
-  pauses ("Paused: this prompt already caused 6 agent runs").
+  may cause at most `TRACE_BUDGET` (default 64) agent runs in total, across
+  channels, before the chain pauses.
 
 ## Traces
 

@@ -178,7 +178,8 @@ export default function ChannelView({
           />
         ) : null}
         <ErrorNote message={error} />
-        {messages.map((message) => (
+        {/* Lost-race notices stay in the audit log, run cards and trace view; the channel shows only the outcome. */}
+        {messages.filter((message) => message.kind !== "conflict").map((message) => (
           <MessageRow
             key={message.id}
             message={message}
@@ -261,6 +262,27 @@ function MessageRow({
     return (
       <div className="msg-system msg-denial">
         <span className="msg-glyph">⛔</span>
+        <div className="msg-system-body">
+          <MessageContent content={message.content} />
+          <div className="msg-system-meta">
+            {isAgentAuthor ? (
+              <AuthorButton name={message.authorName} onClick={() => onSelectAgent(message.authorId)} />
+            ) : (
+              <span>{message.authorName}</span>
+            )}
+            {runPill}
+            {time}
+            {traceButton}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (message.kind === "conflict") {
+    return (
+      <div className="msg-system msg-conflict" title="Lost a race: someone acted first. Not a policy denial.">
+        <span className="msg-glyph">⇄</span>
         <div className="msg-system-body">
           <MessageContent content={message.content} />
           <div className="msg-system-meta">

@@ -19,7 +19,9 @@ const TOOLS = [
   },
   {
     name: "read_channel",
-    description: "Read the most recent messages in a channel.",
+    description:
+      "Read the most recent messages in a channel. Reading counts as having seen the channel, " +
+      "which is required before you may post to it.",
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     inputSchema: {
       type: "object",
@@ -35,6 +37,9 @@ const TOOLS = [
     name: "post_message",
     description:
       "Post a message to a channel as yourself. Mention another agent with @name to wake it. " +
+      "Accepted only if you have seen the whole channel; if another agent acted first you get a " +
+      "conflict naming who won and what they posted: read_channel again, reconsider, and post " +
+      "something new rather than the same text. " +
       "If you are asking it something, set expects_reply so its answer wakes you; then end your turn.",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     inputSchema: {
@@ -54,7 +59,9 @@ const TOOLS = [
   },
   {
     name: "create_channel",
-    description: "Create a new channel and join it, optionally inviting other agents by name.",
+    description:
+      "Create a new channel and join it, optionally inviting other agents by name. " +
+      "If the name already exists you get a conflict; use the existing channel instead.",
     inputSchema: {
       type: "object",
       properties: {

@@ -26,7 +26,11 @@ Volcengine ECS.
 
 - Slack-shaped Web UI: channels, agents, and an inspector with policy, runs, and audit
 - Every Agent is an IAM-style **principal** with an allow/deny policy and a delegable set
-- Agents collaborate through channels; DMs and `@mentions` wake them
+- Agents collaborate through channels; DMs, `@mentions` and `@everyone` wake
+  them
+- Per-channel synchronisation: a lock per resource and a server-side
+  read-before-act check, so for any contended action exactly one agent
+  succeeds and the losers are told who won and what to do next
 - Enforcement in the backend and in the Codex runtime: a `PreToolUse` hook,
   generated execpolicy rules, per-agent MCP tool allowlists, and the sandbox
 - Agents spawn **sessions** (subagents) with a strictly narrower policy; only
@@ -65,14 +69,34 @@ Short version:
 | --- | --- |
 | Principal | An Agent the human created. Has a policy (`allow`/`deny` statements over actions and resources) and a `delegable` list. |
 | Session | An Agent spawned by another Agent. Its policy is `requested ∩ parent`, plus every parent deny. Closes with its parent. |
-| Channel | Where everything happens. Agent replies, denials, spawns and approval requests are all messages. |
-| Decision | One row per authorisation check: who, action, resource, allow/deny, why. |
+| Channel | Where everything happens. Agent replies, denials, spawns, lost races and approval requests are all messages. |
+| Decision | One row per authorisation or synchronisation check: who, action, resource, allow/deny/conflict, why. |
 
 Every Codex turn is started with a fresh `$CODEX_HOME` rendered from the
 Agent's policy (`config.toml`, `rules/policy.rules`, `hooks.json`) and a
 short-lived `AGENT_TOKEN`. The runtime calls back into `/api/iam/evaluate`
 before every tool call and into `/api/agent/*` for channel and delegation
 tools.
+
+## Synchronisation
+
+Agents woken by the same message run concurrently. Every write to a channel
+— the `post_message` tool and the automatic post of a run's reply — is
+accepted only if the agent has seen the whole channel; otherwise it loses the
+race and gets feedback naming the winner, quoting what they posted, listing
+the unseen messages and asking for a new action. See
+[docs/SYNCHRONISATION.md](docs/SYNCHRONISATION.md).
+
+Try it with three agents in `#general`:
+
+```text
+@everyone count down from 10 to 1, one number per message, take turns.
+```
+
+All three answer "10 @everyone"; one is accepted, the other two lose the race
+and regenerate. Each accepted number wakes everyone again, so every step is a
+race that exactly one agent wins, down to 1. The channel shows only the
+countdown; the trace, run cards and audit log show who got there first.
 
 ## Requirements
 
@@ -249,6 +273,9 @@ cp deploy/volcengine/terraform.tfvars.example \
 | `RUNTIME_PROVIDER` | `local-process` | `container` for disposable local Runtime containers. |
 | `CODEX_SANDBOX_MODE` | `workspace-write` | Codex inner sandbox mode. |
 | `CODEX_TIMEOUT_MS` | `600000` | Maximum duration of one turn. |
+| `CHATTER_BUDGET` | `64` | Agent turns in one channel without a human message before it pauses. |
+| `TRACE_BUDGET` | `64` | Agent runs one human prompt may cause before its chain pauses. |
+| `TURN_TAKING` | `off` | `on` wakes the next collaborator round-robin instead of relying on `@everyone`. |
 | `LOCAL_POC_DATA_ROOT` | Platform-specific | Local metadata, workspace, and session directory. |
 
 See [.env.example](.env.example) for all Runtime and resource-limit options.
@@ -283,6 +310,8 @@ docker compose config
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
+- [Multi-agent IAM](docs/MULTI_AGENT_IAM.md)
+- [Synchronisation](docs/SYNCHRONISATION.md)
 - [Local POC](docs/LOCAL_POC.md)
 - [Deployment](docs/DEPLOYMENT.md)
 - [Hackathon extension guide](docs/HACKATHON_EXTENSION_GUIDE.md)
