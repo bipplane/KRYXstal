@@ -326,3 +326,99 @@ describe("Approvals", () => {
     await expect(service.resolveApproval(approval.id, "deny")).rejects.toMatchObject({ statusCode: 409 });
   });
 });
+
+describe("Traces", () => {
+  it("links every message, run and decision caused by one prompt across channels", async () => {
+    let service!: AgentService;
+    const prompts: string[] = [];
+    const runner: AgentRunner = {
+      run: async (request) => {
+        prompts.push(request.prompt);
+        const agent = service.getAgent(request.agentId);
+        if (agent.name === "AgentA") {
+          // AgentA acts mid-run: posts into #test, which wakes AgentB there.
+          await service.agentPostMessage(
+            { agentId: request.agentId, runId: request.runId, expiresAt: Date.now() + 60_000 },
+            "test",
+            "Hello @AgentB from A",
+          );
+          return { output: "Posted in #test.", threadId: "a", usage: null };
+        }
+        return { output: "Hi A, B here.", threadId: "b", usage: null };
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    };
+    ({ service } = await makeService(runner));
+    const test = await service.createChannel({ name: "test" });
+    const a = await service.createAgent({ name: "AgentA", channelIds: [test.id] });
+    const b = await service.createAgent({ name: "AgentB", channelIds: [test.id] });
+    const general = service.getChannelByName("general");
+    const root = await service.postUserMessage(general.id, "@AgentA say hi to B in #test");
+    expect(root.traceId).toBe(root.id);
+    expect(root.parentMessageId).toBeNull();
+
+    await expect
+      .poll(() => service.getTrace(root.id).runs.filter((run) => run.status === "completed").length)
+      .toBe(2);
+    await expect.poll(() => service.getTrace(root.id).messages.length).toBe(4);
+    const trace = service.getTrace(root.id);
+    expect(trace.live).toBe(false);
+    expect(trace.rootId).toBe(root.id);
+    expect(trace.messages.map((m) => m.authorName + "@" + trace.channels.find((c) => c.id === m.channelId)?.name)).toEqual([
+      "You@general",
+      "AgentA@test",
+      "AgentA@general",
+      "AgentB@test",
+    ]);
+    expect(trace.messages.every((m) => m.traceId === root.id)).toBe(true);
+    const aPost = trace.messages[1];
+    const bReply = trace.messages[3];
+    expect(aPost?.parentMessageId).toBe(root.id);
+    expect(bReply?.parentMessageId).toBe(aPost?.id);
+    expect(trace.runs.map((run) => run.agentId)).toEqual([a.id, b.id]);
+    expect(trace.runs[0]?.triggerMessageId).toBe(root.id);
+    expect(trace.runs[1]?.triggerMessageId).toBe(aPost?.id);
+    expect(trace.decisions.map((d) => d.tool)).toEqual(["post_message"]);
+    expect(trace.decisions[0]?.traceId).toBe(root.id);
+    expect(trace.agents.map((agent) => agent.name).sort()).toEqual(["AgentA", "AgentB"]);
+    // The human-triggered run gets no chain context; the agent-triggered one does.
+    expect(prompts[0]).not.toContain("Chain context");
+    expect(prompts[1]).toContain("Chain context: these messages follow from You's original request in #general");
+    expect(prompts[1]).toContain("The latest message is from another agent");
+    expect(prompts[1]).toContain("used 1 of 6 agent runs");
+    // Any message in the chain resolves to the same trace.
+    expect(service.getTrace(bReply?.id ?? "").rootId).toBe(root.id);
+    expect(() => service.getTrace("00000000-0000-0000-0000-000000000000")).toThrow("Message not found");
+  });
+});
+
+describe("Trace budget", () => {
+  it("stops a ping-pong after TRACE_BUDGET runs caused by one prompt", async () => {
+    let service!: AgentService;
+    const runner: AgentRunner = {
+      run: async (request) => {
+        const me = service.getAgent(request.agentId);
+        const other = me.name === "Ping" ? "@Pong" : "@Ping";
+        return { output: "thanks " + other, threadId: me.name, usage: null };
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    };
+    ({ service } = await makeService(runner));
+    await service.createAgent({ name: "Ping" });
+    await service.createAgent({ name: "Pong" });
+    const general = service.getChannelByName("general");
+    const root = await service.postUserMessage(general.id, "@Ping say hi to @Pong");
+    await expect
+      .poll(() => service.getMessages(general.id).some((m) => m.content.startsWith("Paused: this prompt")), { timeout: 5_000 })
+      .toBe(true);
+    await expect.poll(() => service.getTrace(root.id).live).toBe(false);
+    const trace = service.getTrace(root.id);
+    expect(trace.runs.length).toBe(6);
+    expect(trace.messages.filter((m) => m.kind === "system")).toHaveLength(1);
+    // A fresh human message starts a new trace and wakes again.
+    const again = await service.postUserMessage(general.id, "@Ping once more");
+    await expect.poll(() => service.getTrace(again.id).runs.length).toBeGreaterThan(0);
+  });
+});

@@ -76,6 +76,10 @@ export interface ChannelMessage {
   content: string;
   runId: string | null;
   approvalId: string | null;
+  /** Id of the root message that started this causal chain (self for roots). */
+  traceId: string;
+  /** Message that directly caused this one (the one that woke the run), null for roots. */
+  parentMessageId: string | null;
   createdAt: string;
 }
 
@@ -90,6 +94,7 @@ export interface Decision {
   resource: string;
   effect: Effect;
   reason: string;
+  traceId: string | null;
   createdAt: string;
 }
 
@@ -122,6 +127,9 @@ export interface AgentRun {
   status: RunStatus;
   trigger: "user" | "channel" | "spawn";
   channelId: string | null;
+  traceId: string | null;
+  /** Message whose arrival woke this run. */
+  triggerMessageId: string | null;
   prompt: string;
   output: string | null;
   error: string | null;
@@ -150,6 +158,17 @@ export interface ApprovalRequest {
   channelMessageId: string | null;
   createdAt: string;
   resolvedAt: string | null;
+}
+
+export interface Trace {
+  rootId: string;
+  root: ChannelMessage;
+  messages: ChannelMessage[];
+  runs: AgentRun[];
+  decisions: Decision[];
+  channels: Channel[];
+  agents: Array<Pick<Agent, "id" | "name" | "kind" | "parentAgentId">>;
+  live: boolean;
 }
 
 export interface Database {

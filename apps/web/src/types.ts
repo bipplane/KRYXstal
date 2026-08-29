@@ -80,6 +80,10 @@ export interface ChannelMessage {
   content: string;
   runId: string | null;
   approvalId: string | null;
+  /** Id of the root message that started this causal chain (self for roots). */
+  traceId: string;
+  /** Message that directly caused this one (the one that woke the run), null for roots. */
+  parentMessageId: string | null;
   createdAt: string;
 }
 
@@ -94,6 +98,7 @@ export interface Decision {
   resource: string;
   effect: Effect;
   reason: string;
+  traceId: string | null;
   createdAt: string;
 }
 
@@ -126,6 +131,9 @@ export interface AgentRun {
   status: RunStatus;
   trigger: "user" | "channel" | "spawn";
   channelId: string | null;
+  traceId: string | null;
+  /** Message whose arrival woke this run. */
+  triggerMessageId: string | null;
   prompt: string;
   output: string | null;
   error: string | null;
@@ -164,6 +172,24 @@ export interface SystemInfo {
   runtimeProvider: string;
   containerEngine: string | null;
   runtime: string;
+}
+
+/** GET /api/traces/:messageId — everything caused by one root message, across channels. */
+export interface Trace {
+  rootId: string;
+  root: ChannelMessage;
+  /** All messages in the trace, oldest first (includes root). */
+  messages: ChannelMessage[];
+  /** Runs woken inside the trace, oldest first. */
+  runs: AgentRun[];
+  /** Decisions taken during those runs, oldest first. */
+  decisions: Decision[];
+  /** Channels referenced by the messages. */
+  channels: Channel[];
+  /** Agents referenced, for names/kinds. */
+  agents: Array<Pick<Agent, "id" | "name" | "kind" | "parentAgentId">>;
+  /** True while any run in the trace is still queued/running. */
+  live: boolean;
 }
 
 export interface Overview {

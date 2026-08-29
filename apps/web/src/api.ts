@@ -9,6 +9,7 @@ import type {
   Overview,
   PolicyPresets,
   SystemInfo,
+  Trace,
 } from "./types";
 
 export class ApiError extends Error {
@@ -103,4 +104,7 @@ export const api = {
     ),
   decisions: (limit = 100) =>
     request<{ decisions: Decision[] }>("/api/decisions?limit=" + String(limit)),
+
+  /** Everything caused by one root message; `messageId` may be any message in the chain. */
+  trace: (messageId: string) => request<Trace>("/api/traces/" + encodeURIComponent(messageId)),
 };

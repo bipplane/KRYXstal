@@ -84,8 +84,10 @@ export class WorkspaceManager {
       context.tools.length > 0
         ? "- Use the `launchpad` MCP tools (" +
           context.tools.join(", ") +
-          ") to read other channels, post elsewhere, or coordinate with other agents. Mention an agent with @name to wake it."
+          ") to read other channels, post elsewhere, or coordinate with other agents."
         : "- You have no channel tools; reply in prose only.",
+      "- Mentions: `@name` wakes that agent and costs a run. Use it only when you need a reply or an action from them. When you refer to an agent in the third person, or no reply is expected, write the plain name without `@`. Never `@`mention to acknowledge, thank, or confirm.",
+      "- Once what was asked has been done, stop: reply briefly without mentions rather than continuing the exchange.",
       context.tools.includes("spawn_agent")
         ? "- `spawn_agent` creates a session under your identity with a subset of your permissions. Give it a clear task and a channel to report in; sessions cannot exceed what you can do."
         : "",

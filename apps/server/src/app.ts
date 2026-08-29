@@ -213,6 +213,11 @@ export async function createApp(
     return { decisions: service.getDecisions(undefined, query.limit) };
   });
 
+  app.get("/api/traces/:id", async (request) => {
+    const { id } = idParams.parse(request.params);
+    return service.getTrace(id);
+  });
+
   app.post("/api/approvals/:id", async (request) => {
     const { id } = idParams.parse(request.params);
     const body = approvalBody.parse(request.body);

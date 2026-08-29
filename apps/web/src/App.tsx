@@ -5,6 +5,7 @@ import ChannelDialog from "./components/ChannelDialog";
 import ChannelView from "./components/ChannelView";
 import Inspector, { type RunFocus } from "./components/Inspector";
 import Sidebar from "./components/Sidebar";
+import TraceView from "./components/TraceView";
 import { Spinner } from "./components/ui";
 import type { Agent, AgentInput, Channel, Overview, PolicyPresets, SystemInfo } from "./types";
 
@@ -52,6 +53,7 @@ export default function App() {
   const [selectedChannelId, setSelectedChannelId] = useState<string | null>(null);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [runFocus, setRunFocus] = useState<RunFocus | null>(null);
+  const [traceMessageId, setTraceMessageId] = useState<string | null>(null);
   const [wizard, setWizard] = useState<WizardState | null>(null);
   const [channelDialog, setChannelDialog] = useState(false);
   const pickedDefault = useRef(false);
@@ -182,7 +184,10 @@ export default function App() {
 
   const selectAgentAndDm = useCallback((agent: Agent) => {
     setSelectedAgentId(agent.id);
-    if (agent.dmChannelId) setSelectedChannelId(agent.dmChannelId);
+    if (agent.dmChannelId) {
+      setTraceMessageId(null);
+      setSelectedChannelId(agent.dmChannelId);
+    }
   }, []);
 
   const selectAgentById = useCallback((agentId: string) => {
@@ -192,6 +197,22 @@ export default function App() {
   const openRun = useCallback((agentId: string, runId: string) => {
     setSelectedAgentId(agentId);
     setRunFocus({ agentId, runId, nonce: Date.now() });
+  }, []);
+
+  const openTrace = useCallback((messageId: string) => {
+    setTraceMessageId(messageId);
+  }, []);
+
+  /** Leave the trace, landing on the channel the root prompt was posted in (when known). */
+  const closeTrace = useCallback((channelId: string | null) => {
+    setTraceMessageId(null);
+    if (channelId) setSelectedChannelId(channelId);
+  }, []);
+
+  // Picking a channel from the sidebar or inspector leaves the trace view.
+  const selectChannel = useCallback((channelId: string) => {
+    setTraceMessageId(null);
+    setSelectedChannelId(channelId);
   }, []);
 
   const startAgent = useCallback(
@@ -298,18 +319,30 @@ export default function App() {
           overview={overview}
           selectedChannelId={selectedChannelId}
           selectedAgentId={selectedAgentId}
-          onSelectChannel={setSelectedChannelId}
+          onSelectChannel={selectChannel}
           onSelectAgent={selectAgentAndDm}
           onNewAgent={() => setWizard({ mode: "create" })}
           onNewChannel={() => setChannelDialog(true)}
         />
-        <ChannelView
-          channel={selectedChannel}
-          overview={overview}
-          onSelectAgent={selectAgentById}
-          onOpenRun={openRun}
-          onResolveApproval={resolveApproval}
-        />
+        {traceMessageId ? (
+          <TraceView
+            key={traceMessageId}
+            messageId={traceMessageId}
+            overview={overview}
+            onBack={closeTrace}
+            onSelectAgent={selectAgentById}
+            onOpenRun={openRun}
+          />
+        ) : (
+          <ChannelView
+            channel={selectedChannel}
+            overview={overview}
+            onSelectAgent={selectAgentById}
+            onOpenRun={openRun}
+            onOpenTrace={openTrace}
+            onResolveApproval={resolveApproval}
+          />
+        )}
         <Inspector
           agent={selectedAgent}
           overview={overview}
@@ -318,7 +351,7 @@ export default function App() {
           onStop={stopAgent}
           onEdit={(agent) => setWizard({ mode: "edit", agent })}
           onDelete={deleteAgent}
-          onSelectChannel={setSelectedChannelId}
+          onSelectChannel={selectChannel}
           onSelectAgent={(agent) => setSelectedAgentId(agent.id)}
           onClear={() => setSelectedAgentId(null)}
         />

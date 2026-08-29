@@ -89,6 +89,8 @@ export function migrateV1(raw: {
       content: message.content,
       runId: message.runId,
       approvalId: null,
+      traceId: message.id,
+      parentMessageId: null,
       createdAt: message.createdAt,
     }),
   );
@@ -98,6 +100,8 @@ export function migrateV1(raw: {
     status: run.status as Database["runs"][number]["status"],
     trigger: "user",
     channelId: null,
+    traceId: null,
+    triggerMessageId: null,
     prompt: run.prompt,
     output: run.output,
     error: run.error,

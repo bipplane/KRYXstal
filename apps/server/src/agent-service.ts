@@ -36,6 +36,7 @@ import type {
   Policy,
   RunEvent,
   RunIdentity,
+  Trace,
   UpdateAgentInput,
 } from "./types.js";
 import { WorkspaceManager, type InstructionContext } from "./workspace.js";
@@ -48,6 +49,8 @@ const APPROVALS_CHANNEL = "approvals";
 const MAX_SESSION_DEPTH = 3;
 /** Agent-to-agent turns allowed in one channel before a human has to speak again. */
 const CHATTER_BUDGET = 8;
+/** Agent runs one human prompt may cause in total (across channels) before pausing. */
+const TRACE_BUDGET = 6;
 const MAX_DECISIONS = 2_000;
 const MAX_EVENTS_PER_RUN = 300;
 const CONTEXT_MESSAGES = 20;
@@ -79,6 +82,13 @@ interface RunOptions {
   trigger: AgentRun["trigger"];
   channelId: string | null;
   prompt: string;
+  traceId: string | null;
+  triggerMessageId: string | null;
+}
+
+interface TraceContext {
+  traceId?: string | undefined;
+  parentMessageId?: string | null | undefined;
 }
 
 export class AgentService {
@@ -86,8 +96,10 @@ export class AgentService {
   private readonly cancellationRequests = new Set<string>();
   private readonly tokens = new Map<string, RunIdentity>();
   private readonly liveEvents = new Map<string, RunEvent[]>();
-  private readonly pendingWakes = new Map<string, Set<string>>();
+  /** agentId -> channelId -> id of the latest message that asked for a wake. */
+  private readonly pendingWakes = new Map<string, Map<string, string>>();
   private readonly chatter = new Map<string, number>();
+  private readonly traceNotices = new Set<string>();
 
   constructor(
     private readonly config: AppConfig,
@@ -116,6 +128,15 @@ export class AgentService {
           agent.updatedAt = now();
         }
       }
+      for (const message of database.messages) {
+        message.traceId ??= message.id;
+        message.parentMessageId ??= null;
+      }
+      for (const run of database.runs) {
+        run.traceId ??= null;
+        run.triggerMessageId ??= null;
+      }
+      for (const decision of database.decisions) decision.traceId ??= null;
       this.ensureSystemChannels(database);
       for (const agent of database.agents) {
         if (!agent.dmChannelId) {
@@ -496,18 +517,74 @@ export class AgentService {
   private appendMessage(
     database: Database,
     channelId: string,
-    input: Omit<ChannelMessage, "id" | "channelId" | "createdAt">,
+    input: Omit<ChannelMessage, "id" | "channelId" | "createdAt" | "traceId" | "parentMessageId"> &
+      TraceContext,
   ): ChannelMessage {
+    const id = randomUUID();
+    const { traceId, parentMessageId, ...rest } = input;
     const message: ChannelMessage = {
-      id: randomUUID(),
+      id,
       channelId,
       createdAt: now(),
-      ...input,
+      ...rest,
+      traceId: traceId ?? id,
+      parentMessageId: parentMessageId ?? null,
     };
     database.messages.push(message);
     const channel = database.channels.find((item) => item.id === channelId);
     if (channel) channel.lastMessageAt = message.createdAt;
     return message;
+  }
+
+  // ------------------------------------------------------------------ traces
+
+  /** Trace context for anything produced by a run: same trace, caused by the message that woke it. */
+  private traceOfRun(runId: string | null): TraceContext {
+    if (!runId) return {};
+    const run = this.store.peek().runs.find((item) => item.id === runId);
+    if (!run) return {};
+    return { traceId: run.traceId ?? undefined, parentMessageId: run.triggerMessageId };
+  }
+
+  getTrace(messageId: string): Trace {
+    const database = this.store.peek();
+    const origin = database.messages.find((item) => item.id === messageId);
+    if (!origin) throw new HttpError(404, "Message not found");
+    const traceId = origin.traceId;
+    const root = database.messages.find((item) => item.id === traceId) ?? origin;
+    const messages = database.messages
+      .filter((item) => item.traceId === traceId)
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+    const runs = database.runs
+      .filter((run) => run.traceId === traceId)
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+      .map((run) => this.getRun(run.id));
+    const decisions = database.decisions
+      .filter((decision) => decision.traceId === traceId)
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+    const channelIds = new Set(messages.map((item) => item.channelId));
+    for (const run of runs) if (run.channelId) channelIds.add(run.channelId);
+    const agentIds = new Set<string>();
+    for (const item of messages) agentIds.add(item.authorId);
+    for (const run of runs) agentIds.add(run.agentId);
+    for (const decision of decisions) agentIds.add(decision.agentId);
+    return {
+      rootId: root.id,
+      root: structuredClone(root),
+      messages: structuredClone(messages),
+      runs,
+      decisions: structuredClone(decisions),
+      channels: structuredClone(database.channels.filter((channel) => channelIds.has(channel.id))),
+      agents: database.agents
+        .filter((agent) => agentIds.has(agent.id))
+        .map((agent) => ({
+          id: agent.id,
+          name: agent.name,
+          kind: agent.kind,
+          parentAgentId: agent.parentAgentId,
+        })),
+      live: runs.some((run) => run.status === "queued" || run.status === "running"),
+    };
   }
 
   // ---------------------------------------------------------- agent identity
@@ -610,9 +687,12 @@ export class AgentService {
     }
   }
 
-  private async recordDecision(input: Omit<Decision, "id" | "createdAt">): Promise<Decision> {
+  private async recordDecision(
+    input: Omit<Decision, "id" | "createdAt" | "traceId">,
+  ): Promise<Decision> {
+    const traceId = this.traceOfRun(input.runId).traceId ?? null;
     return this.store.mutate((database) => {
-      const decision: Decision = { id: randomUUID(), createdAt: now(), ...input };
+      const decision: Decision = { id: randomUUID(), createdAt: now(), traceId, ...input };
       database.decisions.push(decision);
       if (database.decisions.length > MAX_DECISIONS) {
         database.decisions.splice(0, database.decisions.length - MAX_DECISIONS);
@@ -640,6 +720,7 @@ export class AgentService {
         content: agent.name + " → " + action + " on " + resource + " denied (" + reason + ")",
         runId,
         approvalId: null,
+        ...this.traceOfRun(runId),
       }),
     );
   }
@@ -692,6 +773,7 @@ export class AgentService {
         content,
         runId: identity.runId,
         approvalId: null,
+        ...this.traceOfRun(identity.runId),
       }),
     );
     await this.wakeMembers(channel.id, message);
@@ -794,6 +876,7 @@ export class AgentService {
             (derived.policy?.statements.filter((s) => s.effect === "allow").flatMap((s) => s.actions).join(", ") || "no grants"),
           runId: identity.runId,
           approvalId: null,
+          ...this.traceOfRun(identity.runId),
         });
       }
       return structuredClone(session);
@@ -820,6 +903,7 @@ export class AgentService {
           content: input.task?.trim() ?? "",
           runId: identity.runId,
           approvalId: null,
+          ...this.traceOfRun(identity.runId),
         }),
       );
       await this.wakeMembers(stored.dmChannelId, message);
@@ -888,6 +972,7 @@ export class AgentService {
           payload.instructions,
         runId: identity.runId,
         approvalId: approval.id,
+        ...this.traceOfRun(identity.runId),
       });
       approval.channelMessageId = message.id;
       database.approvals.push(approval);
@@ -910,6 +995,9 @@ export class AgentService {
       });
     }
     const requester = this.store.peek().agents.find((agent) => agent.id === approval.requesterId);
+    const requestMessage = this.store
+      .peek()
+      .messages.find((item) => item.id === approval.channelMessageId);
     const resolved = await this.store.mutate((database) => {
       const stored = database.approvals.find((item) => item.id === id);
       if (!stored) throw new HttpError(404, "Approval not found");
@@ -930,6 +1018,8 @@ export class AgentService {
           content: text,
           runId: null,
           approvalId: stored.id,
+          traceId: requestMessage?.traceId,
+          parentMessageId: requestMessage?.id ?? null,
         });
       }
       return structuredClone(stored);
@@ -1039,32 +1129,75 @@ export class AgentService {
       if (evaluate(agent.policy, "channel:read", "channel:" + channel.name).effect !== "allow") {
         continue;
       }
-      await this.queueTurn(agent.id, channelId);
+      await this.queueTurn(agent.id, channelId, message);
     }
   }
 
-  private async queueTurn(agentId: string, channelId: string): Promise<void> {
+  /** True (and posts a notice once) when one prompt has already caused TRACE_BUDGET runs. */
+  private async traceExhausted(trigger: ChannelMessage, channelId: string): Promise<boolean> {
+    const runs = this.store.peek().runs.filter((run) => run.traceId === trigger.traceId).length;
+    if (runs < TRACE_BUDGET) return false;
+    if (runs === TRACE_BUDGET && !this.traceNotices.has(trigger.traceId)) {
+      this.traceNotices.add(trigger.traceId);
+      await this.store.mutate((database) =>
+        this.appendMessage(database, channelId, {
+          authorId: "system",
+          authorName: "system",
+          authorKind: "system",
+          kind: "system",
+          content:
+            "Paused: this prompt already caused " +
+            TRACE_BUDGET +
+            " agent runs. Post a new message to continue.",
+          runId: null,
+          approvalId: null,
+          traceId: trigger.traceId,
+          parentMessageId: trigger.id,
+        }),
+      );
+    }
+    return true;
+  }
+
+  private deferWake(agentId: string, channelId: string, messageId: string): void {
+    const pending = this.pendingWakes.get(agentId) ?? new Map<string, string>();
+    pending.set(channelId, messageId);
+    this.pendingWakes.set(agentId, pending);
+  }
+
+  private async queueTurn(
+    agentId: string,
+    channelId: string,
+    trigger: ChannelMessage,
+  ): Promise<void> {
     if (!isModelConfigured(this.config)) return;
+    if (trigger.authorKind !== "user" && (await this.traceExhausted(trigger, channelId))) return;
     const agent = this.getAgent(agentId);
     if (agent.status === "busy" || this.activeExecutions.has(agentId)) {
-      const pending = this.pendingWakes.get(agentId) ?? new Set<string>();
-      pending.add(channelId);
-      this.pendingWakes.set(agentId, pending);
+      this.deferWake(agentId, channelId, trigger.id);
       return;
     }
-    const prompt = this.buildChannelPrompt(agent, channelId);
+    const prompt = this.buildChannelPrompt(agent, channelId, trigger);
     if (!prompt) return;
     try {
-      await this.startRun(agent, { trigger: "channel", channelId, prompt });
+      await this.startRun(agent, {
+        trigger: "channel",
+        channelId,
+        prompt,
+        traceId: trigger.traceId,
+        triggerMessageId: trigger.id,
+      });
     } catch (error) {
       if (!(error instanceof HttpError && error.statusCode === 409)) throw error;
-      const pending = this.pendingWakes.get(agentId) ?? new Set<string>();
-      pending.add(channelId);
-      this.pendingWakes.set(agentId, pending);
+      this.deferWake(agentId, channelId, trigger.id);
     }
   }
 
-  private buildChannelPrompt(agent: Agent, channelId: string): string | null {
+  private buildChannelPrompt(
+    agent: Agent,
+    channelId: string,
+    trigger?: ChannelMessage | undefined,
+  ): string | null {
     const database = this.store.peek();
     const channel = database.channels.find((item) => item.id === channelId);
     if (!channel) return null;
@@ -1092,11 +1225,37 @@ export class AgentService {
         (message.kind === "message" ? ": " : " · " + message.kind + ": ") +
         message.content,
     );
+    const chain: string[] = [];
+    if (trigger) {
+      const root = database.messages.find((item) => item.id === trigger.traceId);
+      const runsSoFar = database.runs.filter((run) => run.traceId === trigger.traceId).length;
+      if (root && root.id !== trigger.id) {
+        chain.push(
+          "Chain context: these messages follow from " +
+            root.authorName +
+            "'s original request in #" +
+            (database.channels.find((item) => item.id === root.channelId)?.name ?? "?") +
+            ': "' +
+            root.content.slice(0, 400).replace(/\s+/g, " ") +
+            '". This chain has already used ' +
+            runsSoFar +
+            " of " +
+            TRACE_BUDGET +
+            " agent runs.",
+        );
+      }
+      if (trigger.authorKind !== "user") {
+        chain.push(
+          "The latest message is from another agent, not the human. If the original request is already resolved, reply in one short line without @mentioning anyone (or say nothing new). Only @mention an agent when you need a reply or an action from it; otherwise write its plain name.",
+        );
+      }
+    }
     return [
       "New messages in #" + channel.name + " addressed to you:",
       "",
       ...lines,
       "",
+      ...(chain.length > 0 ? [...chain, ""] : []),
       "Respond to these messages. Your reply is posted to #" +
         channel.name +
         " automatically; use the launchpad tools only to act elsewhere or coordinate with other agents.",
@@ -1113,6 +1272,8 @@ export class AgentService {
       status: "queued",
       trigger: options.trigger,
       channelId: options.channelId,
+      traceId: options.traceId,
+      triggerMessageId: options.triggerMessageId,
       prompt: options.prompt,
       output: null,
       error: null,
@@ -1205,6 +1366,8 @@ export class AgentService {
           content: result.output,
           runId: run.id,
           approvalId: null,
+          traceId: run.traceId ?? undefined,
+          parentMessageId: run.triggerMessageId,
         });
       });
       if (posted) await this.wakeMembers(posted.channelId, posted);
@@ -1235,6 +1398,8 @@ export class AgentService {
               content: agent.name + " run failed: " + message,
               runId: run.id,
               approvalId: null,
+              traceId: run.traceId ?? undefined,
+              parentMessageId: run.triggerMessageId,
             });
           }
         }
@@ -1249,18 +1414,26 @@ export class AgentService {
   private async drainPendingWakes(agentId: string): Promise<void> {
     const pending = this.pendingWakes.get(agentId);
     if (!pending || pending.size === 0) return;
-    const [channelId] = pending;
-    if (!channelId) return;
+    const [entry] = pending;
+    if (!entry) return;
+    const [channelId, messageId] = entry;
     pending.delete(channelId);
     if (pending.size === 0) this.pendingWakes.delete(agentId);
     const agent = this.getAgent(agentId);
     if (agent.status !== "ready") return;
-    const prompt = this.buildChannelPrompt(agent, channelId);
+    const trigger = this.store.peek().messages.find((item) => item.id === messageId);
+    const prompt = this.buildChannelPrompt(agent, channelId, trigger);
     if (!prompt) {
       await this.drainPendingWakes(agentId);
       return;
     }
-    await this.startRun(agent, { trigger: "channel", channelId, prompt }).catch(() => undefined);
+    await this.startRun(agent, {
+      trigger: "channel",
+      channelId,
+      prompt,
+      traceId: trigger?.traceId ?? null,
+      triggerMessageId: trigger?.id ?? null,
+    }).catch(() => undefined);
   }
 
   // ----------------------------------------------------------------- helpers

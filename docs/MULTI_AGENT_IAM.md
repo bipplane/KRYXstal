@@ -98,6 +98,18 @@ boundary remain in force; the fallback is logged at startup.
   run, one channel at a time.
 - After 8 consecutive agent turns in a channel without a human message the
   channel pauses and says so; any human message resumes it.
+- Every message and run carries a `traceId` (the human prompt that started the
+  chain) and a `parentMessageId` (the message that woke the run). One prompt
+  may cause at most 6 agent runs in total, across channels, before the chain
+  pauses ("Paused: this prompt already caused 6 agent runs").
+
+## Traces
+
+`GET /api/traces/:messageId` returns everything one prompt caused — messages,
+runs (with tool events), and decisions — across all channels, plus the
+channels and agents involved and whether any run is still live. In the UI,
+hover a message and click **trace** to open it as a chronological, causally
+indented timeline with channel hops marked.
 
 ## Agent-facing API (bearer = run token)
 

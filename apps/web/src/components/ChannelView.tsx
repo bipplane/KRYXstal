@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { api, ApiError } from "../api";
 import type { Agent, ApprovalRequest, Channel, ChannelMessage, Overview } from "../types";
-import { Avatar, clockTime, EmptyState, ErrorNote, fullTime, Spinner, Tag, useNow } from "./ui";
+import { Avatar, clockTime, EmptyState, ErrorNote, fullTime, MessageContent, Spinner, Tag, useNow } from "./ui";
 
 interface ChannelViewProps {
   channel: Channel | null;
   overview: Overview | null;
   onSelectAgent: (agentId: string) => void;
   onOpenRun: (agentId: string, runId: string) => void;
+  onOpenTrace: (messageId: string) => void;
   onResolveApproval: (approvalId: string, decision: "approve" | "deny") => Promise<void>;
 }
 
@@ -18,6 +19,7 @@ export default function ChannelView({
   overview,
   onSelectAgent,
   onOpenRun,
+  onOpenTrace,
   onResolveApproval,
 }: ChannelViewProps) {
   const channelId = channel?.id ?? null;
@@ -184,6 +186,7 @@ export default function ChannelView({
             now={now}
             onSelectAgent={onSelectAgent}
             onOpenRun={onOpenRun}
+            onOpenTrace={onOpenTrace}
             onResolveApproval={onResolveApproval}
           />
         ))}
@@ -218,10 +221,19 @@ interface MessageRowProps {
   now: number;
   onSelectAgent: (agentId: string) => void;
   onOpenRun: (agentId: string, runId: string) => void;
+  onOpenTrace: (messageId: string) => void;
   onResolveApproval: (approvalId: string, decision: "approve" | "deny") => Promise<void>;
 }
 
-function MessageRow({ message, agents, overview, onSelectAgent, onOpenRun, onResolveApproval }: MessageRowProps) {
+function MessageRow({
+  message,
+  agents,
+  overview,
+  onSelectAgent,
+  onOpenRun,
+  onOpenTrace,
+  onResolveApproval,
+}: MessageRowProps) {
   const isAgentAuthor = message.authorKind === "principal" || message.authorKind === "session";
   const authorAgent = isAgentAuthor ? agents.find((a) => a.id === message.authorId) ?? null : null;
   const time = (
@@ -240,6 +252,9 @@ function MessageRow({ message, agents, overview, onSelectAgent, onOpenRun, onRes
         run · {message.runId.slice(0, 8)}
       </button>
     ) : null;
+  const traceButton = (
+    <TraceButton always={message.authorKind === "user"} onClick={() => onOpenTrace(message.id)} />
+  );
 
   if (message.kind === "denial") {
     return (
@@ -255,6 +270,7 @@ function MessageRow({ message, agents, overview, onSelectAgent, onOpenRun, onRes
             )}
             {runPill}
             {time}
+            {traceButton}
           </div>
         </div>
       </div>
@@ -275,6 +291,7 @@ function MessageRow({ message, agents, overview, onSelectAgent, onOpenRun, onRes
             )}
             {runPill}
             {time}
+            {traceButton}
           </div>
         </div>
       </div>
@@ -286,6 +303,7 @@ function MessageRow({ message, agents, overview, onSelectAgent, onOpenRun, onRes
       <div className="msg-notice">
         <span>{message.content}</span>
         {time}
+        {traceButton}
       </div>
     );
   }
@@ -300,6 +318,7 @@ function MessageRow({ message, agents, overview, onSelectAgent, onOpenRun, onRes
         approval={approval}
         overview={overview}
         time={time}
+        traceButton={traceButton}
         onSelectAgent={onSelectAgent}
         onResolveApproval={onResolveApproval}
       />
@@ -321,10 +340,24 @@ function MessageRow({ message, agents, overview, onSelectAgent, onOpenRun, onRes
           {authorAgent && authorAgent.status === "busy" ? <Tag tone="purple">busy</Tag> : null}
           {runPill}
           {time}
+          {traceButton}
         </div>
         <MessageContent content={message.content} />
       </div>
     </div>
+  );
+}
+
+function TraceButton({ always, onClick }: { always: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      className={"trace-open" + (always ? " trace-open-always" : "")}
+      title="Show everything this message caused, across channels"
+      onClick={onClick}
+    >
+      trace
+    </button>
   );
 }
 
@@ -341,6 +374,7 @@ function ApprovalCard({
   approval,
   overview,
   time,
+  traceButton,
   onSelectAgent,
   onResolveApproval,
 }: {
@@ -348,6 +382,7 @@ function ApprovalCard({
   approval: ApprovalRequest | null;
   overview: Overview | null;
   time: ReactNode;
+  traceButton: ReactNode;
   onSelectAgent: (agentId: string) => void;
   onResolveApproval: (approvalId: string, decision: "approve" | "deny") => Promise<void>;
 }) {
@@ -385,6 +420,7 @@ function ApprovalCard({
         <span className="approval-title">Approval requested</span>
         <span className={"approval-status approval-status-" + statusLabel}>{statusLabel}</span>
         {time}
+        {traceButton}
       </div>
       <div className="approval-body">
         <div className="approval-line">
@@ -443,40 +479,4 @@ function ApprovalCard({
       </div>
     </div>
   );
-}
-
-// ---------- content rendering (newlines + fenced code, no markdown lib) ----------
-
-const FENCE = /```([^\n`]*)\n?([\s\S]*?)```/g;
-
-export function MessageContent({ content }: { content: string }) {
-  const parts: ReactNode[] = [];
-  let last = 0;
-  let index = 0;
-  for (const match of content.matchAll(FENCE)) {
-    const start = match.index ?? 0;
-    if (start > last) {
-      parts.push(
-        <p key={"t" + index++} className="msg-text">
-          {content.slice(last, start)}
-        </p>,
-      );
-    }
-    const lang = match[1].trim();
-    parts.push(
-      <pre key={"c" + index++} className="msg-code" data-lang={lang || undefined}>
-        <code>{match[2].replace(/\n$/, "")}</code>
-      </pre>,
-    );
-    last = start + match[0].length;
-  }
-  if (last < content.length) {
-    parts.push(
-      <p key={"t" + index++} className="msg-text">
-        {content.slice(last)}
-      </p>,
-    );
-  }
-  if (parts.length === 0) return null;
-  return <div className="msg-content">{parts}</div>;
 }

@@ -204,3 +204,39 @@ export function ErrorNote({ message }: { message: string | null }) {
     </div>
   );
 }
+
+// ---------- message content (newlines + fenced code, no markdown lib) ----------
+
+const FENCE = /```([^\n`]*)\n?([\s\S]*?)```/g;
+
+export function MessageContent({ content }: { content: string }) {
+  const parts: ReactNode[] = [];
+  let last = 0;
+  let index = 0;
+  for (const match of content.matchAll(FENCE)) {
+    const start = match.index ?? 0;
+    if (start > last) {
+      parts.push(
+        <p key={"t" + index++} className="msg-text">
+          {content.slice(last, start)}
+        </p>,
+      );
+    }
+    const lang = match[1].trim();
+    parts.push(
+      <pre key={"c" + index++} className="msg-code" data-lang={lang || undefined}>
+        <code>{match[2].replace(/\n$/, "")}</code>
+      </pre>,
+    );
+    last = start + match[0].length;
+  }
+  if (last < content.length) {
+    parts.push(
+      <p key={"t" + index++} className="msg-text">
+        {content.slice(last)}
+      </p>,
+    );
+  }
+  if (parts.length === 0) return null;
+  return <div className="msg-content">{parts}</div>;
+}
