@@ -177,7 +177,8 @@ export default function ChannelView({
           />
         ) : null}
         <ErrorNote message={error} />
-        {messages.map((message) => (
+        {/* Lost-race notices stay in the audit log, run cards and trace view; the channel shows only the outcome. */}
+        {messages.filter((message) => message.kind !== "conflict").map((message) => (
           <MessageRow
             key={message.id}
             message={message}

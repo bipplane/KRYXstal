@@ -93,8 +93,9 @@ Try it with three agents in `#general`:
 @everyone count down from 10 to 1, one number per message, take turns.
 ```
 
-All three answer "10"; one is accepted, the other two are shown ⇄ *"got there
-first"* and come back with 9 and 8, and the group takes turns to 1.
+All three answer "10"; one is accepted, the other two lose the race and come
+back with 9 and 8, and the group takes turns to 1. The channel shows only the
+countdown; the trace, run cards and audit log show who got there first.
 
 ## Requirements
 

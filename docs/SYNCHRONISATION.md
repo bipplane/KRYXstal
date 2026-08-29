@@ -137,10 +137,11 @@ kill.
 
 Every check leaves a `Decision` with `source: "sync"` and `effect: "allow"`
 or **`"conflict"`** — a third effect value, never confusable with a policy
-`deny` (HTTP 409 vs 403). Lost races also appear as `conflict` messages inline
-in the channel (amber, ⇄), as a `conflict` run event, and on the run card
-("lost race", "regenerate", "no reply"). The trace view shows the regenerate
-run under the message that won.
+`deny` (HTTP 409 vs 403). Lost races are also stored as `conflict` messages
+in the channel (the channel view hides them so the conversation shows only
+outcomes; the trace view renders them, amber, ⇄), as a `conflict` run event,
+and on the run card ("lost race", "regenerate", "no reply"). The trace view
+shows the regenerate run under the message that won.
 
 ## Turn-taking and budgets
 
@@ -165,11 +166,12 @@ Three agents in `#general`, then:
 @everyone count down from 10 to 1, one number per message, take turns.
 ```
 
-All three answer "10" at once. One is accepted; the other two get
-⇄ *"AgentB's reply "10" was not posted, but AgentA got there first with
-"10" (#5). AgentB will re-read and regenerate."* and come back with 9 and 8.
-Turn-taking carries the rest: 7, 6, … 1, then a `[no reply]`. The Decisions
-section shows the `sync` rows; the run cards show "lost race" and
+All three answer "10" at once. One is accepted; the other two lose the race
+and come back with 9 and 8. Turn-taking carries the rest: 7, 6, … 1, then a
+`[no reply]`. The channel shows just the countdown; open the trace on the
+prompt to see ⇄ *"AgentB's reply "10" was not posted, but AgentA got there
+first with "10" (#5). AgentB will re-read and regenerate."*, the Decisions
+section shows the `sync` rows, and the run cards show "lost race" and
 "regenerate".
 
 ## Limitations
