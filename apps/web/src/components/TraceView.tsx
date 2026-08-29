@@ -712,11 +712,11 @@ function MessageItem({
     </time>
   );
 
-  if (message.kind === "denial" || message.kind === "spawn") {
-    const denial = message.kind === "denial";
+  if (message.kind === "denial" || message.kind === "spawn" || message.kind === "conflict") {
+    const glyph = message.kind === "denial" ? "⛔" : message.kind === "conflict" ? "⇄" : "⑂";
     return (
-      <div className={"msg-system trace-msg " + (denial ? "msg-denial" : "msg-spawn")}>
-        <span className="msg-glyph">{denial ? "⛔" : "⑂"}</span>
+      <div className={"msg-system trace-msg msg-" + message.kind}>
+        <span className="msg-glyph">{glyph}</span>
         <div className="msg-system-body">
           <LongContent content={message.content} />
           <div className="msg-system-meta">

@@ -2008,3 +2008,33 @@ textarea {
   flex: 1;
   min-width: 0;
 }
+
+/* ---------- synchronisation conflicts (lost races; distinct from policy denials) ---------- */
+
+.effect-conflict {
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+.msg-conflict {
+  background: var(--amber-soft);
+  border-color: #ecd9a8;
+  color: #7a5410;
+}
+.decision-conflict {
+  border-left: 3px solid var(--amber);
+}
+.timeline-conflict .timeline-glyph {
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+.run-conflict {
+  margin: 6px 0 2px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--amber-soft);
+  color: #7a5410;
+  line-height: 1.45;
+}
+.run-conflict .msg-glyph {
+  font-size: 13px;
+}

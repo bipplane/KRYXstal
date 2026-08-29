@@ -277,6 +277,27 @@ function MessageRow({
     );
   }
 
+  if (message.kind === "conflict") {
+    return (
+      <div className="msg-system msg-conflict" title="Lost a race: someone acted first. Not a policy denial.">
+        <span className="msg-glyph">⇄</span>
+        <div className="msg-system-body">
+          <MessageContent content={message.content} />
+          <div className="msg-system-meta">
+            {isAgentAuthor ? (
+              <AuthorButton name={message.authorName} onClick={() => onSelectAgent(message.authorId)} />
+            ) : (
+              <span>{message.authorName}</span>
+            )}
+            {runPill}
+            {time}
+            {traceButton}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (message.kind === "spawn") {
     return (
       <div className="msg-system msg-spawn">

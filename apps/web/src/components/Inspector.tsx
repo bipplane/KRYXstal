@@ -434,6 +434,14 @@ function RunCard({
       <div className="run-head">
         <StatusPill status={run.status} />
         <span className="muted small">via {TRIGGER_LABEL[run.trigger]}</span>
+        {run.conflict ? (
+          <Tag tone="red">lost race</Tag>
+        ) : run.conflicts > 0 ? (
+          <Tag tone="purple">
+            {run.conflicts} conflict{run.conflicts === 1 ? "" : "s"}
+          </Tag>
+        ) : null}
+        {run.silent ? <Tag>no reply</Tag> : null}
         {channel ? (
           <button type="button" className="link-btn small" onClick={() => onSelectChannel(channel.id)}>
             #{channel.name}
@@ -454,9 +462,24 @@ function RunCard({
         ) : null}
       </div>
       {run.error ? <div className="error-note small">{run.error}</div> : null}
+      {run.conflict ? (
+        <div className="run-conflict small">
+          <span className="msg-glyph">⇄</span>{" "}
+          {run.conflict.cause === "busy"
+            ? "Reply not posted: the channel was busy."
+            : "Reply not posted: " +
+              (run.conflict.winnerName ?? "someone") +
+              " got there first with “" +
+              truncate(run.conflict.winnerContent ?? "", 80) +
+              "”."}{" "}
+          {run.conflict.attempt > run.conflict.limit
+            ? "Stopped after " + run.conflict.limit + " lost races."
+            : "A regenerate turn was queued."}
+        </div>
+      ) : null}
       {run.output ? (
         <div className="run-output">
-          <span className="muted small">Output</span>
+          <span className="muted small">{run.conflict ? "Rejected reply" : run.silent ? "Reply (not posted)" : "Output"}</span>
           <p className="pre-wrap">{outputOpen || !outputLong ? run.output : truncate(run.output, 400)}</p>
           {outputLong ? (
             <button type="button" className="link-btn small" onClick={() => setOutputOpen((v) => !v)}>
@@ -576,6 +599,7 @@ function GlobalAudit() {
 
   const allowed = decisions?.filter((d) => d.effect === "allow").length ?? 0;
   const denied = decisions?.filter((d) => d.effect === "deny").length ?? 0;
+  const conflicts = decisions?.filter((d) => d.effect === "conflict").length ?? 0;
 
   return (
     <div className="inspector-scroll">
@@ -584,12 +608,16 @@ function GlobalAudit() {
           <h2>Audit log</h2>
         </div>
         <p className="inspector-desc">
-          Every policy decision across all agents, newest first. Select an agent to inspect it.
+          Every policy and synchronisation decision across all agents, newest first. Select an agent to
+          inspect it.
         </p>
         {decisions ? (
           <div className="audit-stats">
             <span className="effect effect-allow">{allowed} allowed</span>
             <span className="effect effect-deny">{denied} denied</span>
+            <span className="effect effect-conflict" title="Lost races: not policy denials">
+              {conflicts} lost {conflicts === 1 ? "race" : "races"}
+            </span>
           </div>
         ) : null}
       </header>
