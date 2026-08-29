@@ -394,12 +394,14 @@ const EVENT_GLYPH: Record<RunEventType, string> = {
   file_change: "✎",
   web_search: "⌕",
   reasoning: "…",
+  conflict: "⇄",
 };
 
 const TRIGGER_LABEL: Record<AgentRun["trigger"], string> = {
   user: "you",
   channel: "channel",
   spawn: "spawn",
+  conflict: "regenerate",
 };
 
 function RunCard({

@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import type { AgentStatus, AuthorKind, Effect, RunStatus } from "../types";
+import type { AgentStatus, AuthorKind, DecisionEffect, RunStatus } from "../types";
 
 // ---------- time helpers ----------
 
@@ -65,7 +65,7 @@ export function StatusPill({ status }: { status: AgentStatus | RunStatus }) {
   );
 }
 
-export function EffectBadge({ effect }: { effect: Effect }) {
+export function EffectBadge({ effect }: { effect: DecisionEffect }) {
   return <span className={"effect effect-" + effect}>{effect}</span>;
 }
 

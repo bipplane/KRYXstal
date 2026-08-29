@@ -790,6 +790,7 @@ const EVENT_GLYPH: Record<RunEventType, string> = {
   file_change: "✎",
   web_search: "⌕",
   reasoning: "…",
+  conflict: "⇄",
 };
 
 function RunItem({

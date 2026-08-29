@@ -333,6 +333,7 @@ export async function createApp(
     return reply.code(statusCode).send({
       error: appError.message,
       ...(validationError ? { details: error.issues } : {}),
+      ...(error instanceof HttpError && error.details ? error.details : {}),
     });
   });
 

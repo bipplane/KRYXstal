@@ -21,6 +21,19 @@ import {
   USER_POLICY,
 } from "./policy.js";
 import { assignSequenceNumbers, JsonStore, legacyDmChannelId } from "./store.js";
+import {
+  channelHead,
+  channelKey,
+  createInMemorySync,
+  isNoReply,
+  LockTimeoutError,
+  NO_REPLY,
+  quote,
+  renderConflictFeedback,
+  unseenMessages,
+  type Lease,
+  type SyncBackend,
+} from "./sync.js";
 import type {
   Agent,
   AgentInput,
@@ -30,12 +43,14 @@ import type {
   ApprovalRequest,
   Channel,
   ChannelMessage,
+  Conflict,
   Database,
   Decision,
   Effect,
   Policy,
   RunEvent,
   RunIdentity,
+  RunnerResult,
   Trace,
   UpdateAgentInput,
 } from "./types.js";
@@ -51,9 +66,42 @@ const MAX_SESSION_DEPTH = 3;
 const CHATTER_BUDGET = 8;
 /** Agent runs one human prompt may cause in total (across channels) before pausing. */
 const TRACE_BUDGET = 6;
+/** Lost races one turn may hit (tool posts plus regenerated replies) before it is stopped. */
+export const MAX_CONFLICTS_PER_TURN = 3;
 const MAX_DECISIONS = 2_000;
 const MAX_EVENTS_PER_RUN = 300;
 const CONTEXT_MESSAGES = 20;
+
+/** Thrown inside the run-start mutation when the wake prompt has nothing to say. */
+class NothingToDoError extends Error {
+  constructor() {
+    super("Nothing to do");
+    this.name = "NothingToDoError";
+  }
+}
+
+interface PendingWake {
+  /** Newest message that asked for this wake. */
+  messageId: string;
+  /** Set when the agent's last reply lost a race and it must regenerate. */
+  conflict: Conflict | null;
+}
+
+type SyncOutcome<T> = { ok: true; value: T } | { ok: false; conflict: Conflict };
+
+interface SyncedAction<T> {
+  /** Lock key, e.g. `channel:<id>`. */
+  resource: string;
+  holder: string;
+  /** Runs under the lock inside the store mutation; a Conflict rejects the action. */
+  validate: (database: Database) => Conflict | null;
+  /** Runs in the same mutation when `validate` passed. */
+  commit: (database: Database) => T;
+  /** Runs in the same mutation when `validate` failed (e.g. to post a notice). */
+  onConflict?: ((database: Database, conflict: Conflict) => void) | undefined;
+  /** Builds the conflict returned when the lock wait times out. */
+  busy: (holder: string | null) => Conflict;
+}
 
 export interface ToolCallVerdict {
   effect: Effect;
@@ -81,9 +129,12 @@ export interface RequestPrincipalInput {
 interface RunOptions {
   trigger: AgentRun["trigger"];
   channelId: string | null;
-  prompt: string;
+  /** A prompt, or a builder evaluated inside the run-start mutation (null = nothing to do). */
+  prompt: string | ((database: Database) => string | null);
   traceId: string | null;
   triggerMessageId: string | null;
+  /** Conflicts already hit earlier in this turn (a regenerate continues the count). */
+  inheritedConflicts?: number | undefined;
 }
 
 interface TraceContext {
@@ -96,16 +147,19 @@ export class AgentService {
   private readonly cancellationRequests = new Set<string>();
   private readonly tokens = new Map<string, RunIdentity>();
   private readonly liveEvents = new Map<string, RunEvent[]>();
-  /** agentId -> channelId -> id of the latest message that asked for a wake. */
-  private readonly pendingWakes = new Map<string, Map<string, string>>();
+  /** agentId -> channelId -> the wake (and any conflict feedback) owed to the agent. */
+  private readonly pendingWakes = new Map<string, Map<string, PendingWake>>();
   private readonly chatter = new Map<string, number>();
   private readonly traceNotices = new Set<string>();
+  /** Conflicts per run id for identities without a stored run (tests, ad-hoc tokens). */
+  private readonly conflictCounts = new Map<string, number>();
 
   constructor(
     private readonly config: AppConfig,
     private readonly store: JsonStore,
     private readonly workspaces: WorkspaceManager,
     private readonly runner: AgentRunner,
+    private readonly sync: SyncBackend = createInMemorySync(),
   ) {}
 
   // ---------------------------------------------------------------- lifecycle
@@ -135,6 +189,10 @@ export class AgentService {
       for (const run of database.runs) {
         run.traceId ??= null;
         run.triggerMessageId ??= null;
+        run.seenSeq ??= null;
+        run.conflicts ??= 0;
+        run.conflict ??= null;
+        run.silent ??= false;
       }
       for (const decision of database.decisions) decision.traceId ??= null;
       this.ensureSystemChannels(database);
@@ -154,7 +212,22 @@ export class AgentService {
         }
       }
       assignSequenceNumbers(database);
+      this.seedReadState(database);
     });
+  }
+
+  /** After a restart, what each agent has seen is what its runs covered plus its own posts. */
+  private seedReadState(database: Database): void {
+    for (const run of database.runs) {
+      if (run.channelId && run.seenSeq !== null) {
+        this.sync.reads.advance(run.agentId, channelKey(run.channelId), run.seenSeq);
+      }
+    }
+    for (const message of database.messages) {
+      if (message.authorId !== USER_ID && message.authorKind !== "system") {
+        this.sync.reads.advance(message.authorId, channelKey(message.channelId), message.seq);
+      }
+    }
   }
 
   private ensureSystemChannels(database: Database): void {
@@ -483,20 +556,35 @@ export class AgentService {
     });
   }
 
-  /** The human posts to a channel. Wakes every member the message addresses. */
+  /**
+   * The human posts to a channel. Wakes every member the message addresses.
+   * The human is the authority: the post takes the channel lock (so it never
+   * interleaves with an agent's validate+commit) but is never rejected as stale.
+   * It does bump `lastSeq`, so every agent's view of the channel becomes stale
+   * until it re-reads.
+   */
   async postUserMessage(channelId: string, content: string): Promise<ChannelMessage> {
     const channel = this.getChannel(channelId);
-    const message = await this.store.mutate((database) =>
-      this.appendMessage(database, channel.id, {
-        authorId: USER_ID,
-        authorName: this.config.userName,
-        authorKind: "user",
-        kind: "message",
-        content,
-        runId: null,
-        approvalId: null,
-      }),
-    );
+    const lease = await this.sync.locks.acquire(channelKey(channel.id), USER_ID).catch((error) => {
+      if (error instanceof LockTimeoutError) throw new HttpError(503, "Channel is busy, try again");
+      throw error;
+    });
+    let message: ChannelMessage;
+    try {
+      message = await this.store.mutate((database) =>
+        this.appendMessage(database, channel.id, {
+          authorId: USER_ID,
+          authorName: this.config.userName,
+          authorKind: "user",
+          kind: "message",
+          content,
+          runId: null,
+          approvalId: null,
+        }),
+      );
+    } finally {
+      lease.release();
+    }
     this.chatter.set(channel.id, 0);
     await this.wakeMembers(channel.id, message);
     return message;
@@ -593,6 +681,258 @@ export class AgentService {
         })),
       live: runs.some((run) => run.status === "queued" || run.status === "running"),
     };
+  }
+
+  // ------------------------------------------------------- synchronisation
+
+  /**
+   * Runs one contended action: take the resource lock, then validate and
+   * commit inside a single store mutation, so nothing else can write between
+   * the check and the append. The lock is released whatever happens; a lease
+   * expires it if this process never gets there.
+   *
+   * To wire a new action, supply a resource key, a `validate` that returns a
+   * Conflict when the actor's view is stale, and a `commit`.
+   */
+  private async performSynced<T>(action: SyncedAction<T>): Promise<SyncOutcome<T>> {
+    let lease;
+    try {
+      lease = await this.sync.locks.acquire(action.resource, action.holder);
+    } catch (error) {
+      if (error instanceof LockTimeoutError) {
+        return { ok: false, conflict: action.busy(error.holder) };
+      }
+      throw error;
+    }
+    try {
+      return await this.store.mutate((database): SyncOutcome<T> => {
+        const conflict = action.validate(database);
+        if (conflict) {
+          action.onConflict?.(database, conflict);
+          return { ok: false, conflict };
+        }
+        return { ok: true, value: action.commit(database) };
+      });
+    } finally {
+      lease.release();
+    }
+  }
+
+  /** Conflicts this turn has already hit, from the stored run or the ad-hoc counter. */
+  private conflictsSoFar(database: Readonly<Database>, runId: string | null): number {
+    if (!runId) return 0;
+    const run = database.runs.find((item) => item.id === runId);
+    return run ? run.conflicts : (this.conflictCounts.get(runId) ?? 0);
+  }
+
+  private countConflict(database: Database, runId: string | null): void {
+    if (!runId) return;
+    const run = database.runs.find((item) => item.id === runId);
+    if (run) run.conflicts += 1;
+    else this.conflictCounts.set(runId, (this.conflictCounts.get(runId) ?? 0) + 1);
+  }
+
+  /**
+   * Read-before-act: the agent may write to the channel only if it has been
+   * shown every state-bearing message in it. Returns the Conflict otherwise.
+   */
+  private staleCheck(
+    database: Readonly<Database>,
+    agent: Agent,
+    channelId: string,
+    rejectedContent: string,
+    runId: string | null,
+  ): Conflict | null {
+    const channel = database.channels.find((item) => item.id === channelId);
+    if (!channel) return null;
+    const seenSeq = this.sync.reads.get(agent.id, channelKey(channelId));
+    const head = channelHead(database, channelId);
+    if (!head || head.seq <= seenSeq || head.authorId === agent.id) return null;
+    const unseen = unseenMessages(database, channelId, agent.id, seenSeq);
+    const winner = unseen.at(-1) ?? head;
+    const conflict: Conflict = {
+      resource: "channel:" + channel.name,
+      cause: "stale",
+      winnerId: winner.authorId,
+      winnerName: winner.authorName,
+      winnerContent: winner.content,
+      winnerMessageId: winner.id,
+      winnerSeq: winner.seq,
+      rejectedContent,
+      unseen,
+      seenSeq,
+      headSeq: head.seq,
+      attempt: this.conflictsSoFar(database, runId) + 1,
+      limit: MAX_CONFLICTS_PER_TURN,
+      feedback: "",
+    };
+    conflict.feedback = renderConflictFeedback(conflict, channel.name);
+    return conflict;
+  }
+
+  private busyConflict(
+    agent: Agent,
+    channel: Channel,
+    rejectedContent: string,
+    runId: string | null,
+    holder: string | null,
+  ): Conflict {
+    const conflict: Conflict = {
+      resource: "channel:" + channel.name,
+      cause: "busy",
+      winnerId: holder,
+      winnerName: holder,
+      winnerContent: null,
+      winnerMessageId: null,
+      winnerSeq: null,
+      rejectedContent,
+      unseen: [],
+      seenSeq: this.sync.reads.get(agent.id, channelKey(channel.id)),
+      headSeq: channel.lastSeq,
+      attempt: this.conflictsSoFar(this.store.peek(), runId) + 1,
+      limit: MAX_CONFLICTS_PER_TURN,
+      feedback: "",
+    };
+    conflict.feedback = renderConflictFeedback(conflict, channel.name);
+    return conflict;
+  }
+
+  /** One-line, judge-readable notice posted into the channel where the race was lost. */
+  private conflictNotice(agent: Agent, conflict: Conflict, source: "post_message" | "auto_post"): string {
+    const tried =
+      source === "auto_post"
+        ? agent.name + "'s reply " + quote(conflict.rejectedContent, 80) + " was not posted"
+        : agent.name + " tried to post " + quote(conflict.rejectedContent, 80);
+    const why =
+      conflict.cause === "busy"
+        ? "the channel was busy"
+        : (conflict.winnerName ?? "someone") +
+          " got there first with " +
+          quote(conflict.winnerContent ?? "", 80) +
+          " (#" +
+          String(conflict.winnerSeq ?? "?") +
+          ")";
+    const next =
+      conflict.attempt > conflict.limit
+        ? agent.name + " stops here: " + String(conflict.limit) + " conflicts this turn."
+        : agent.name + " will re-read and regenerate.";
+    return tried + ", but " + why + ". " + next;
+  }
+
+  private appendConflictNotice(
+    database: Database,
+    agent: Agent,
+    channelId: string,
+    conflict: Conflict,
+    runId: string | null,
+    source: "post_message" | "auto_post",
+  ): ChannelMessage {
+    return this.appendMessage(database, channelId, {
+      authorId: agent.id,
+      authorName: agent.name,
+      authorKind: agent.kind,
+      kind: "conflict",
+      content: this.conflictNotice(agent, conflict, source),
+      runId,
+      approvalId: null,
+      ...this.traceOfRun(runId),
+    });
+  }
+
+  private conflictEvent(conflict: Conflict, channelName: string): RunEvent {
+    return {
+      id: randomUUID(),
+      type: "conflict",
+      summary:
+        "post to #" +
+        channelName +
+        " rejected: " +
+        (conflict.cause === "busy"
+          ? "channel busy"
+          : (conflict.winnerName ?? "someone") + " posted " + quote(conflict.winnerContent ?? "", 80) + " first"),
+      status: conflict.attempt > conflict.limit ? "limit" : "conflict",
+      exitCode: null,
+      detail: conflict.feedback,
+      createdAt: now(),
+    };
+  }
+
+  private async recordSync(
+    agent: Agent,
+    runId: string | null,
+    tool: string,
+    channel: Channel,
+    outcome: { ok: true; message: ChannelMessage } | { ok: false; conflict: Conflict },
+  ): Promise<void> {
+    await this.recordDecision({
+      agentId: agent.id,
+      agentName: agent.name,
+      runId,
+      source: "sync",
+      tool,
+      action: "channel:post",
+      resource: "channel:" + channel.name,
+      effect: outcome.ok ? "allow" : "conflict",
+      reason: outcome.ok
+        ? "Read-before-act: seen through #" +
+          String(outcome.message.seq - 1) +
+          ", posted #" +
+          String(outcome.message.seq)
+        : outcome.conflict.cause === "busy"
+          ? "Lock wait timed out" + (outcome.conflict.winnerName ? " (held by " + outcome.conflict.winnerName + ")" : "")
+          : "Lost the race: " +
+            (outcome.conflict.winnerName ?? "someone") +
+            " posted #" +
+            String(outcome.conflict.winnerSeq) +
+            " after this agent's last read (#" +
+            String(outcome.conflict.seenSeq) +
+            ")" +
+            (outcome.conflict.attempt > outcome.conflict.limit ? "; conflict limit reached" : ""),
+    });
+  }
+
+  /**
+   * An agent writes to a channel through a tool. IAM has already passed; this
+   * is the synchronisation half: lock, read-before-act, commit, and on a lost
+   * race a notice in the channel, a run event and a Decision row.
+   */
+  private async agentChannelPost(
+    agent: Agent,
+    channel: Channel,
+    content: string,
+    runId: string | null,
+  ): Promise<{ ok: true; message: ChannelMessage } | { ok: false; conflict: Conflict }> {
+    const outcome = await this.performSynced<ChannelMessage>({
+      resource: channelKey(channel.id),
+      holder: runId ? "run:" + runId : "agent:" + agent.id,
+      validate: (database) => this.staleCheck(database, agent, channel.id, content, runId),
+      commit: (database) => {
+        const message = this.appendMessage(database, channel.id, {
+          authorId: agent.id,
+          authorName: agent.name,
+          authorKind: agent.kind,
+          kind: "message",
+          content,
+          runId,
+          approvalId: null,
+          ...this.traceOfRun(runId),
+        });
+        this.sync.reads.advance(agent.id, channelKey(channel.id), message.seq);
+        return message;
+      },
+      onConflict: (database, conflict) => {
+        this.countConflict(database, runId);
+        this.appendConflictNotice(database, agent, channel.id, conflict, runId, "post_message");
+      },
+      busy: (holder) => this.busyConflict(agent, channel, content, runId, holder),
+    });
+    const result = outcome.ok ? { ok: true as const, message: outcome.value } : outcome;
+    await this.recordSync(agent, runId, "post_message", channel, result);
+    if (!result.ok && runId) {
+      const events = this.liveEvents.get(runId);
+      if (events && events.length < MAX_EVENTS_PER_RUN) events.push(this.conflictEvent(result.conflict, channel.name));
+    }
+    return result;
   }
 
   // ---------------------------------------------------------- agent identity
@@ -761,7 +1101,10 @@ export class AgentService {
     const agent = this.getAgent(identity.agentId);
     const channel = this.getChannelByName(channelName);
     await this.authorize(agent, identity.runId, "read_channel", "channel:read", "channel:" + channel.name);
-    return this.getMessages(channel.id, limit);
+    // getMessages serves the tail of the channel, so the agent has now seen all of it.
+    const messages = this.getMessages(channel.id, limit);
+    this.sync.reads.advance(agent.id, channelKey(channel.id), this.getChannel(channel.id).lastSeq);
+    return messages;
   }
 
   async agentPostMessage(
@@ -772,20 +1115,22 @@ export class AgentService {
     const agent = this.getAgent(identity.agentId);
     const channel = this.getChannelByName(channelName);
     await this.authorize(agent, identity.runId, "post_message", "channel:post", "channel:" + channel.name);
-    const message = await this.store.mutate((database) =>
-      this.appendMessage(database, channel.id, {
-        authorId: agent.id,
-        authorName: agent.name,
-        authorKind: agent.kind,
-        kind: "message",
-        content,
-        runId: identity.runId,
-        approvalId: null,
-        ...this.traceOfRun(identity.runId),
-      }),
-    );
-    await this.wakeMembers(channel.id, message);
-    return message;
+    const result = await this.agentChannelPost(agent, channel, content, identity.runId);
+    if (!result.ok) {
+      const { conflict } = result;
+      if (conflict.attempt > conflict.limit) {
+        throw new HttpError(
+          409,
+          "Conflict limit reached: " +
+            String(conflict.limit) +
+            " lost races in this turn. Stop calling post_message; finish with a plain reply that says what you learned.",
+          { conflict },
+        );
+      }
+      throw new HttpError(409, conflict.feedback, { conflict });
+    }
+    await this.wakeMembers(channel.id, result.message);
+    return result.message;
   }
 
   async agentCreateChannel(
@@ -1167,9 +1512,17 @@ export class AgentService {
     return true;
   }
 
-  private deferWake(agentId: string, channelId: string, messageId: string): void {
-    const pending = this.pendingWakes.get(agentId) ?? new Map<string, string>();
-    pending.set(channelId, messageId);
+  private deferWake(
+    agentId: string,
+    channelId: string,
+    messageId: string,
+    conflict: Conflict | null = null,
+  ): void {
+    const pending = this.pendingWakes.get(agentId) ?? new Map<string, PendingWake>();
+    const existing = pending.get(channelId);
+    // A regenerate request and a plain wake for the same channel merge into one turn that
+    // carries the conflict feedback; the newest message stays the trigger.
+    pending.set(channelId, { messageId, conflict: conflict ?? existing?.conflict ?? null });
     this.pendingWakes.set(agentId, pending);
   }
 
@@ -1185,44 +1538,90 @@ export class AgentService {
       this.deferWake(agentId, channelId, trigger.id);
       return;
     }
-    const prompt = this.buildChannelPrompt(agent, channelId, trigger);
-    if (!prompt) return;
     try {
       await this.startRun(agent, {
         trigger: "channel",
         channelId,
-        prompt,
+        prompt: (database) => this.buildChannelPrompt(database, agent, channelId, trigger, null),
         traceId: trigger.traceId,
         triggerMessageId: trigger.id,
       });
     } catch (error) {
+      if (error instanceof NothingToDoError) return;
       if (!(error instanceof HttpError && error.statusCode === 409)) throw error;
       this.deferWake(agentId, channelId, trigger.id);
     }
   }
 
+  /** The regenerate block: what beat the agent, what it tried, and what to do now. */
+  private conflictPromptBlock(channel: Channel, conflict: Conflict): string[] {
+    const lines = [
+      "Your previous reply to #" +
+        channel.name +
+        " was NOT posted: " +
+        (conflict.cause === "busy"
+          ? "the channel was busy and the wait timed out."
+          : "the channel changed while you were working."),
+    ];
+    if (conflict.winnerName && conflict.winnerContent !== null) {
+      lines.push(
+        conflict.winnerName +
+          " posted " +
+          quote(conflict.winnerContent) +
+          " (#" +
+          channel.name +
+          "/" +
+          String(conflict.winnerSeq ?? "?") +
+          ") before you.",
+      );
+    }
+    lines.push(
+      "Your rejected reply was: " + quote(conflict.rejectedContent),
+      "Several agents may be acting on the same request at once. Re-plan from the channel's current state: decide what the next useful contribution is given what " +
+        (conflict.winnerName ?? "the others") +
+        " already did, and do not repeat your rejected reply. If the request is now fully handled, reply exactly " +
+        NO_REPLY +
+        ". (Conflict " +
+        String(conflict.attempt) +
+        " of " +
+        String(conflict.limit) +
+        " for this turn.)",
+    );
+    return lines;
+  }
+
+  /**
+   * The wake prompt. Built from the snapshot the run is started in, so what
+   * the agent is shown and what it is recorded as having seen cannot drift.
+   */
   private buildChannelPrompt(
+    database: Readonly<Database>,
     agent: Agent,
     channelId: string,
-    trigger?: ChannelMessage | undefined,
+    trigger: ChannelMessage | undefined,
+    conflict: Conflict | null,
   ): string | null {
-    const database = this.store.peek();
     const channel = database.channels.find((item) => item.id === channelId);
     if (!channel) return null;
     const lastRun = database.runs
       .filter((run) => run.agentId === agent.id && run.channelId === channelId && run.completedAt)
       .sort((left, right) => (right.completedAt ?? "").localeCompare(left.completedAt ?? ""))[0];
-    const since = lastRun?.startedAt ?? "";
+    // Window on seq: everything after what the last run's prompt covered. Runs from before
+    // sequence numbers existed fall back to their start time.
+    const legacySince = lastRun && lastRun.seenSeq === null ? (lastRun.startedAt ?? "") : null;
+    const seenSeq = lastRun?.seenSeq ?? 0;
     const messages = database.messages
       .filter(
         (message) =>
           message.channelId === channelId &&
           message.kind !== "denial" &&
+          message.kind !== "conflict" &&
           message.authorId !== agent.id &&
-          message.createdAt > since,
+          (legacySince !== null ? message.createdAt > legacySince : message.seq > seenSeq),
       )
+      .sort((left, right) => left.seq - right.seq)
       .slice(-CONTEXT_MESSAGES);
-    if (messages.length === 0) return null;
+    if (messages.length === 0 && !conflict) return null;
     const lines = messages.map(
       (message) =>
         "[" +
@@ -1258,16 +1657,30 @@ export class AgentService {
         );
       }
     }
-    return [
-      "New messages in #" + channel.name + " addressed to you:",
-      "",
-      ...lines,
-      "",
-      ...(chain.length > 0 ? [...chain, ""] : []),
-      "Respond to these messages. Your reply is posted to #" +
+    const sections: string[] = [];
+    if (conflict) sections.push(...this.conflictPromptBlock(channel, conflict), "");
+    if (messages.length > 0) {
+      sections.push(
+        conflict
+          ? "Messages in #" + channel.name + " since you last read it:"
+          : "New messages in #" + channel.name + " addressed to you:",
+        "",
+        ...lines,
+        "",
+      );
+    }
+    if (chain.length > 0) sections.push(...chain, "");
+    const offerSilence = conflict !== null || trigger?.authorKind !== "user";
+    sections.push(
+      (conflict ? "Reply with your regenerated contribution. It" : "Respond to these messages. Your reply") +
+        " is posted to #" +
         channel.name +
-        " automatically; use the launchpad tools only to act elsewhere or coordinate with other agents.",
-    ].join("\n");
+        " automatically; use the launchpad tools only to act elsewhere or coordinate with other agents." +
+        (offerSilence
+          ? " If there is nothing useful to add, reply exactly " + NO_REPLY + " and nothing is posted."
+          : ""),
+    );
+    return sections.join("\n");
   }
 
   // -------------------------------------------------------------------- runs
@@ -1282,11 +1695,15 @@ export class AgentService {
       channelId: options.channelId,
       traceId: options.traceId,
       triggerMessageId: options.triggerMessageId,
-      prompt: options.prompt,
+      prompt: "",
       output: null,
       error: null,
       usage: null,
       events: [],
+      seenSeq: null,
+      conflicts: options.inheritedConflicts ?? 0,
+      conflict: null,
+      silent: false,
       startedAt: null,
       completedAt: null,
       createdAt: timestamp,
@@ -1297,6 +1714,17 @@ export class AgentService {
       if (stored.status === "stopped") throw new HttpError(409, "Agent is stopped");
       if (stored.status === "closed") throw new HttpError(409, "Session is closed");
       if (stored.status === "busy") throw new HttpError(409, "This Agent is already running");
+      const prompt = typeof options.prompt === "function" ? options.prompt(database) : options.prompt;
+      if (prompt === null) throw new NothingToDoError();
+      run.prompt = prompt;
+      if (options.channelId) {
+        // The prompt covers the channel up to here; that is what the agent has now seen.
+        const channel = database.channels.find((item) => item.id === options.channelId);
+        if (channel) {
+          run.seenSeq = channel.lastSeq;
+          this.sync.reads.advance(agent.id, channelKey(channel.id), channel.lastSeq);
+        }
+      }
       database.runs.push(run);
       const snapshot = structuredClone(stored);
       stored.status = "busy";
@@ -1350,35 +1778,12 @@ export class AgentService {
           if (events.length < MAX_EVENTS_PER_RUN) events.push(event);
         },
       });
-      const completedAt = now();
-      const posted = await this.store.mutate((database) => {
-        const storedRun = database.runs.find((item) => item.id === run.id);
-        const agent = database.agents.find((item) => item.id === agentAtStart.id);
-        if (!storedRun || !agent) return null;
-        storedRun.status = "completed";
-        storedRun.output = result.output;
-        storedRun.usage = result.usage;
-        storedRun.events = events;
-        storedRun.completedAt = completedAt;
-        if (agent.status === "busy") agent.status = "ready";
-        agent.codexThreadId = result.threadId;
-        agent.lastError = null;
-        agent.updatedAt = completedAt;
-        const channelId = run.channelId ?? agent.dmChannelId;
-        if (!channelId) return null;
-        return this.appendMessage(database, channelId, {
-          authorId: agent.id,
-          authorName: agent.name,
-          authorKind: agent.kind,
-          kind: "message",
-          content: result.output,
-          runId: run.id,
-          approvalId: null,
-          traceId: run.traceId ?? undefined,
-          parentMessageId: run.triggerMessageId,
-        });
-      });
-      if (posted) await this.wakeMembers(posted.channelId, posted);
+      const outcome = await this.finishRun(agentAtStart, run, result, events);
+      if (outcome.posted) {
+        await this.wakeMembers(outcome.posted.channelId, outcome.posted);
+      } else if (outcome.conflict && outcome.channelId) {
+        this.regenerateAfterConflict(agentAtStart, run, outcome.channelId, outcome.conflict);
+      }
     } catch (error) {
       const completedAt = now();
       const cancelled = error instanceof RunCancelledError;
@@ -1415,8 +1820,116 @@ export class AgentService {
     } finally {
       this.revokeRunTokens(run.id);
       this.liveEvents.delete(run.id);
+      this.conflictCounts.delete(run.id);
       await this.drainPendingWakes(agentAtStart.id);
     }
+  }
+
+  /**
+   * Completes the run and posts its reply to the channel that woke it — under
+   * the channel lock and the same read-before-act check as the post_message
+   * tool, in one mutation with the completion bookkeeping. A stale reply is not
+   * posted: the run completes with `conflict` set and the caller queues a
+   * regenerate turn. A `[no reply]` posts nothing and wakes nobody.
+   */
+  private async finishRun(
+    agentAtStart: Agent,
+    run: AgentRun,
+    result: RunnerResult,
+    events: RunEvent[],
+  ): Promise<{ posted: ChannelMessage | null; conflict: Conflict | null; channelId: string | null }> {
+    const output = result.output.trim();
+    const silent = isNoReply(output);
+    const channelId = run.channelId ?? agentAtStart.dmChannelId;
+    const channel = channelId
+      ? (this.store.peek().channels.find((item) => item.id === channelId) ?? null)
+      : null;
+    const posting = channel !== null && !silent;
+    let lease: Lease | null = null;
+    let busy: Conflict | null = null;
+    if (posting && channel) {
+      try {
+        lease = await this.sync.locks.acquire(channelKey(channel.id), "run:" + run.id);
+      } catch (error) {
+        if (!(error instanceof LockTimeoutError)) throw error;
+        busy = this.busyConflict(agentAtStart, channel, output, run.id, error.holder);
+      }
+    }
+    try {
+      const outcome = await this.store.mutate((database) => {
+        const completedAt = now();
+        const storedRun = database.runs.find((item) => item.id === run.id);
+        const agent = database.agents.find((item) => item.id === agentAtStart.id);
+        if (!storedRun || !agent) return { posted: null, conflict: null };
+        storedRun.status = "completed";
+        storedRun.output = result.output;
+        storedRun.usage = result.usage;
+        storedRun.silent = silent;
+        storedRun.completedAt = completedAt;
+        if (agent.status === "busy") agent.status = "ready";
+        agent.codexThreadId = result.threadId;
+        agent.lastError = null;
+        agent.updatedAt = completedAt;
+        let posted: ChannelMessage | null = null;
+        let conflict: Conflict | null = null;
+        if (posting && channel) {
+          conflict = busy ?? this.staleCheck(database, agent, channel.id, output, run.id);
+          if (conflict) {
+            storedRun.conflicts += 1;
+            storedRun.conflict = conflict;
+            events.push(this.conflictEvent(conflict, channel.name));
+            this.appendConflictNotice(database, agent, channel.id, conflict, run.id, "auto_post");
+          } else {
+            posted = this.appendMessage(database, channel.id, {
+              authorId: agent.id,
+              authorName: agent.name,
+              authorKind: agent.kind,
+              kind: "message",
+              content: output,
+              runId: run.id,
+              approvalId: null,
+              traceId: run.traceId ?? undefined,
+              parentMessageId: run.triggerMessageId,
+            });
+            this.sync.reads.advance(agent.id, channelKey(channel.id), posted.seq);
+          }
+        }
+        storedRun.events = events;
+        return { posted, conflict };
+      });
+      if (posting && channel) {
+        await this.recordSync(
+          agentAtStart,
+          run.id,
+          "auto_post",
+          channel,
+          outcome.posted
+            ? { ok: true, message: outcome.posted }
+            : { ok: false, conflict: outcome.conflict ?? this.busyConflict(agentAtStart, channel, output, run.id, null) },
+        );
+      }
+      return { ...outcome, channelId: channel?.id ?? null };
+    } finally {
+      lease?.release();
+    }
+  }
+
+  /**
+   * The reply lost a race: owe the agent a regenerate turn carrying the
+   * feedback, hung off the message that beat it. Drained right after this run
+   * settles (one active run per agent). Past the per-turn limit the notice
+   * already says the agent stopped; nothing more is queued.
+   */
+  private regenerateAfterConflict(
+    agent: Agent,
+    run: AgentRun,
+    channelId: string,
+    conflict: Conflict,
+  ): void {
+    if (conflict.attempt > conflict.limit) return;
+    const triggerId = conflict.winnerMessageId ?? run.triggerMessageId;
+    if (!triggerId) return;
+    this.deferWake(agent.id, channelId, triggerId, conflict);
   }
 
   private async drainPendingWakes(agentId: string): Promise<void> {
@@ -1424,24 +1937,25 @@ export class AgentService {
     if (!pending || pending.size === 0) return;
     const [entry] = pending;
     if (!entry) return;
-    const [channelId, messageId] = entry;
+    const [channelId, wake] = entry;
     pending.delete(channelId);
     if (pending.size === 0) this.pendingWakes.delete(agentId);
     const agent = this.getAgent(agentId);
     if (agent.status !== "ready") return;
-    const trigger = this.store.peek().messages.find((item) => item.id === messageId);
-    const prompt = this.buildChannelPrompt(agent, channelId, trigger);
-    if (!prompt) {
-      await this.drainPendingWakes(agentId);
-      return;
+    const trigger = this.store.peek().messages.find((item) => item.id === wake.messageId);
+    try {
+      await this.startRun(agent, {
+        trigger: wake.conflict ? "conflict" : "channel",
+        channelId,
+        prompt: (database) =>
+          this.buildChannelPrompt(database, agent, channelId, trigger, wake.conflict),
+        traceId: trigger?.traceId ?? null,
+        triggerMessageId: trigger?.id ?? null,
+        inheritedConflicts: wake.conflict?.attempt ?? 0,
+      });
+    } catch (error) {
+      if (error instanceof NothingToDoError) await this.drainPendingWakes(agentId);
     }
-    await this.startRun(agent, {
-      trigger: "channel",
-      channelId,
-      prompt,
-      traceId: trigger?.traceId ?? null,
-      triggerMessageId: trigger?.id ?? null,
-    }).catch(() => undefined);
   }
 
   // ----------------------------------------------------------------- helpers

@@ -66,7 +66,8 @@ export interface Channel {
 }
 
 export type AuthorKind = "user" | "principal" | "session" | "system";
-export type MessageKind = "message" | "system" | "denial" | "spawn" | "approval";
+/** `conflict`: an agent lost a race on this channel; rendered inline like `denial` but it is not a policy decision. */
+export type MessageKind = "message" | "system" | "denial" | "spawn" | "approval" | "conflict";
 
 export interface ChannelMessage {
   id: string;
@@ -87,19 +88,49 @@ export interface ChannelMessage {
   createdAt: string;
 }
 
+/** `conflict` is a synchronisation outcome (lost a race), deliberately distinct from a policy `deny`. */
+export type DecisionEffect = Effect | "conflict";
+
 export interface Decision {
   id: string;
   agentId: string;
   agentName: string;
   runId: string | null;
-  source: "hook" | "api" | "scheduler";
+  /** `sync`: read-before-act / lock checks, as opposed to IAM policy checks. */
+  source: "hook" | "api" | "scheduler" | "sync";
   tool: string;
   action: string;
   resource: string;
-  effect: Effect;
+  effect: DecisionEffect;
   reason: string;
   traceId: string | null;
   createdAt: string;
+}
+
+/**
+ * Why a write to a shared resource was not accepted: someone acted first
+ * (`stale`) or the lock could not be obtained in time (`busy`). Carries
+ * everything the losing agent needs to regenerate its action.
+ */
+export interface Conflict {
+  resource: string;
+  cause: "stale" | "busy";
+  /** The message that beat this write (newest unseen state message), when known. */
+  winnerId: string | null;
+  winnerName: string | null;
+  winnerContent: string | null;
+  winnerMessageId: string | null;
+  winnerSeq: number | null;
+  rejectedContent: string;
+  /** State-bearing messages the actor had not been shown, oldest first. */
+  unseen: ChannelMessage[];
+  seenSeq: number;
+  headSeq: number;
+  /** 1-based count of conflicts in this turn, and the cap. */
+  attempt: number;
+  limit: number;
+  /** Model-facing explanation and instruction. */
+  feedback: string;
 }
 
 export type RunEventType =
@@ -107,7 +138,8 @@ export type RunEventType =
   | "mcp_tool_call"
   | "file_change"
   | "web_search"
-  | "reasoning";
+  | "reasoning"
+  | "conflict";
 
 export interface RunEvent {
   id: string;
@@ -129,7 +161,8 @@ export interface AgentRun {
   id: string;
   agentId: string;
   status: RunStatus;
-  trigger: "user" | "channel" | "spawn";
+  /** `conflict`: a regenerate turn queued because the previous reply lost a race. */
+  trigger: "user" | "channel" | "spawn" | "conflict";
   channelId: string | null;
   traceId: string | null;
   /** Message whose arrival woke this run. */
@@ -139,6 +172,14 @@ export interface AgentRun {
   error: string | null;
   usage: RunUsage | null;
   events: RunEvent[];
+  /** Channel `lastSeq` covered by this run's prompt (what the agent had seen when it started). */
+  seenSeq: number | null;
+  /** Sync conflicts hit during this turn (tool calls and the final reply). */
+  conflicts: number;
+  /** Set when the final reply was not posted because the channel had moved on. */
+  conflict: Conflict | null;
+  /** True when the reply was `[no reply]` and nothing was posted. */
+  silent: boolean;
   startedAt: string | null;
   completedAt: string | null;
   createdAt: string;
