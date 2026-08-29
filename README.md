@@ -1,4 +1,4 @@
-### Volc Agent Launchpad
+# Volc Agent Launchpad
 
 A minimal Agent platform for three-day middleware hackathons. It provides Agent
 CRUD, a browser Playground, persistent workspaces, and Codex CLI backed by the
