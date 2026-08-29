@@ -89,6 +89,7 @@ export function migrateV1(raw: {
       content: message.content,
       runId: message.runId,
       approvalId: null,
+      seq: 0, // assigned by assignSequenceNumbers once channels exist
       traceId: message.id,
       parentMessageId: null,
       createdAt: message.createdAt,
@@ -112,6 +113,31 @@ export function migrateV1(raw: {
     createdAt: run.createdAt,
   }));
   return database;
+}
+
+/**
+ * Gives every message a per-channel, 1-based, strictly increasing `seq` and every
+ * channel a matching `lastSeq`. Messages that already carry a seq keep it; the rest
+ * are numbered in arrival order after them. Idempotent, so it runs on every start.
+ */
+export function assignSequenceNumbers(database: Database): void {
+  const byChannel = new Map<string, ChannelMessage[]>();
+  for (const message of database.messages) {
+    const list = byChannel.get(message.channelId) ?? [];
+    list.push(message);
+    byChannel.set(message.channelId, list);
+  }
+  for (const channel of database.channels) {
+    const messages = (byChannel.get(channel.id) ?? []).sort((left, right) =>
+      left.createdAt.localeCompare(right.createdAt),
+    );
+    let next = 0;
+    for (const message of messages) {
+      if (typeof message.seq === "number" && message.seq > next) next = message.seq;
+      else message.seq = ++next;
+    }
+    channel.lastSeq = Math.max(typeof channel.lastSeq === "number" ? channel.lastSeq : 0, next);
+  }
 }
 
 export class JsonStore {

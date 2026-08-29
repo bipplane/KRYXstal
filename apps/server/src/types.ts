@@ -61,6 +61,8 @@ export interface Channel {
   createdAt: string;
   archivedAt: string | null;
   lastMessageAt: string | null;
+  /** Sequence number of the newest message in this channel (0 when empty). */
+  lastSeq: number;
 }
 
 export type AuthorKind = "user" | "principal" | "session" | "system";
@@ -76,6 +78,8 @@ export interface ChannelMessage {
   content: string;
   runId: string | null;
   approvalId: string | null;
+  /** Position in the channel, 1-based and strictly increasing; the unit of "has this agent seen it". */
+  seq: number;
   /** Id of the root message that started this causal chain (self for roots). */
   traceId: string;
   /** Message that directly caused this one (the one that woke the run), null for roots. */

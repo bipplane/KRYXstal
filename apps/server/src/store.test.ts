@@ -2,7 +2,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { JsonStore } from "./store.js";
+import { assignSequenceNumbers, JsonStore } from "./store.js";
+import type { Channel, ChannelMessage, Database } from "./types.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -93,5 +94,55 @@ describe("JsonStore migration", () => {
     expect(database.agents[0]).toMatchObject({ kind: "principal", principalId: "a1", status: "ready" });
     expect(database.agents[0]?.policy.preset).toBe("worker");
     expect(database.messages[0]).toMatchObject({ channelId: "legacy-dm:a1", authorKind: "user" });
+  });
+
+  it("numbers messages per channel in arrival order and is idempotent", () => {
+    const channel = (id: string): Channel => ({
+      id,
+      name: id,
+      description: "",
+      kind: "public",
+      memberIds: [],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      archivedAt: null,
+      lastMessageAt: null,
+      lastSeq: undefined as unknown as number, // pre-seq database file
+    });
+    const message = (id: string, channelId: string, createdAt: string, seq?: number): ChannelMessage => ({
+      id,
+      channelId,
+      authorId: "user",
+      authorName: "You",
+      authorKind: "user",
+      kind: "message",
+      content: id,
+      runId: null,
+      approvalId: null,
+      seq: seq as unknown as number,
+      traceId: id,
+      parentMessageId: null,
+      createdAt,
+    });
+    const database: Database = {
+      version: 2,
+      agents: [],
+      channels: [channel("c1"), channel("c2")],
+      messages: [
+        message("b", "c1", "2026-01-01T00:00:02.000Z"),
+        message("x", "c2", "2026-01-01T00:00:05.000Z", 7),
+        message("a", "c1", "2026-01-01T00:00:01.000Z"),
+        message("y", "c2", "2026-01-01T00:00:06.000Z"),
+      ],
+      runs: [],
+      decisions: [],
+      approvals: [],
+    };
+    assignSequenceNumbers(database);
+    const seqOf = (id: string) => database.messages.find((item) => item.id === id)?.seq;
+    expect([seqOf("a"), seqOf("b")]).toEqual([1, 2]);
+    expect([seqOf("x"), seqOf("y")]).toEqual([7, 8]);
+    expect(database.channels.map((item) => item.lastSeq)).toEqual([2, 8]);
+    assignSequenceNumbers(database);
+    expect([seqOf("a"), seqOf("b"), seqOf("x"), seqOf("y")]).toEqual([1, 2, 7, 8]);
   });
 });

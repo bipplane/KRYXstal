@@ -20,7 +20,7 @@ import {
   PRESETS,
   USER_POLICY,
 } from "./policy.js";
-import { JsonStore, legacyDmChannelId } from "./store.js";
+import { assignSequenceNumbers, JsonStore, legacyDmChannelId } from "./store.js";
 import type {
   Agent,
   AgentInput,
@@ -153,6 +153,7 @@ export class AgentService {
           }
         }
       }
+      assignSequenceNumbers(database);
     });
   }
 
@@ -188,6 +189,7 @@ export class AgentService {
       createdAt: now(),
       archivedAt: null,
       lastMessageAt: null,
+      lastSeq: 0,
     };
     database.channels.push(channel);
     return channel;
@@ -517,22 +519,28 @@ export class AgentService {
   private appendMessage(
     database: Database,
     channelId: string,
-    input: Omit<ChannelMessage, "id" | "channelId" | "createdAt" | "traceId" | "parentMessageId"> &
+    input: Omit<
+      ChannelMessage,
+      "id" | "channelId" | "createdAt" | "seq" | "traceId" | "parentMessageId"
+    > &
       TraceContext,
   ): ChannelMessage {
+    const channel = database.channels.find((item) => item.id === channelId);
+    if (!channel) throw new HttpError(404, "Channel not found");
     const id = randomUUID();
     const { traceId, parentMessageId, ...rest } = input;
+    channel.lastSeq += 1;
     const message: ChannelMessage = {
       id,
       channelId,
       createdAt: now(),
       ...rest,
+      seq: channel.lastSeq,
       traceId: traceId ?? id,
       parentMessageId: parentMessageId ?? null,
     };
     database.messages.push(message);
-    const channel = database.channels.find((item) => item.id === channelId);
-    if (channel) channel.lastMessageAt = message.createdAt;
+    channel.lastMessageAt = message.createdAt;
     return message;
   }
 
