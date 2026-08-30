@@ -157,12 +157,14 @@ export function Modal({
   onClose,
   children,
   width = 640,
+  height,
   footer,
 }: {
   title: string;
   onClose: () => void;
   children: ReactNode;
   width?: number;
+  height?: number;
   footer?: ReactNode;
 }) {
   useEffect(() => {
@@ -177,7 +179,10 @@ export function Modal({
     <div className="modal-backdrop" onMouseDown={onClose}>
       <div
         className="modal"
-        style={{ width: "min(" + width + "px, 100%)" }}
+        style={{
+          width: "min(" + width + "px, 100%)",
+          height: height === undefined ? undefined : "min(" + height + "px, calc(100vh - 48px))",
+        }}
         role="dialog"
         aria-modal="true"
         aria-label={title}
