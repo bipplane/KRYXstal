@@ -90,7 +90,10 @@ export interface ChannelMessage {
   seq: number;
   /** Id of the root message that started this causal chain (self for roots). */
   traceId: string;
-  /** Message that directly caused this one (the one that woke the run), null for roots. */
+  /**
+   * The message this one follows: for an agent's channel post, the newest message it had been
+   * shown in that channel when it replied; otherwise the message that woke the run. Null for roots.
+   */
   parentMessageId: string | null;
   /** When set, whether the author expects an answer; otherwise inferred from a trailing "?". */
   expectsReply?: boolean | undefined;

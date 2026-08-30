@@ -86,8 +86,27 @@ function messageDepths(trace: Trace): Map<string, number> {
   return depths;
 }
 
+/**
+ * The message each run hangs off: what its first channel post replied to (the
+ * newest message it had seen), else the message that woke it. A run woken by
+ * one message often answers a later one once the others have raced ahead.
+ */
+function runAnchors(trace: Trace): Map<string, string | null> {
+  const anchors = new Map<string, string | null>();
+  for (const run of trace.runs) anchors.set(run.id, run.triggerMessageId);
+  const anchored = new Set<string>();
+  for (const message of trace.messages) {
+    // Chronological, so the first post per run wins.
+    if (!message.runId || message.kind !== "message" || anchored.has(message.runId) || !anchors.has(message.runId)) continue;
+    anchored.add(message.runId);
+    anchors.set(message.runId, message.parentMessageId ?? anchors.get(message.runId) ?? null);
+  }
+  return anchors;
+}
+
 function buildTimeline(trace: Trace): TraceItem[] {
   const depths = messageDepths(trace);
+  const anchors = runAnchors(trace);
   const decisionsByRun = new Map<string, Decision[]>();
   const looseDecisions: Decision[] = [];
   for (const decision of trace.decisions) {
@@ -113,13 +132,14 @@ function buildTimeline(trace: Trace): TraceItem[] {
     });
   }
   for (const run of trace.runs) {
-    const triggerDepth = run.triggerMessageId ? depths.get(run.triggerMessageId) : undefined;
+    const anchor = anchors.get(run.id);
+    const anchorDepth = anchor ? depths.get(anchor) : undefined;
     items.push({
       kind: "run",
       key: "r:" + run.id,
       time: ms(run.startedAt ?? run.createdAt),
       order: 0,
-      depth: triggerDepth === undefined ? 1 : triggerDepth + 1,
+      depth: anchorDepth === undefined ? 1 : anchorDepth + 1,
       channelId: run.channelId,
       run,
       decisions: decisionsByRun.get(run.id) ?? [],
@@ -158,12 +178,13 @@ interface TreeNode {
 }
 
 /**
- * Lineage tree: a run hangs off the message that woke it (`triggerMessageId`);
+ * Lineage tree: a run hangs off the message its reply followed (see `runAnchors`);
  * a message hangs off the run that produced it (`runId`), or else off the message
  * it replies to (`parentMessageId`). Anything unattached hangs off the root.
  */
 function buildTree(trace: Trace): TreeNode | null {
   const items = buildTimeline(trace); // already chronologically sorted
+  const anchors = runAnchors(trace);
   const nodes = new Map<string, TreeNode>();
   for (const item of items) nodes.set(item.key, { item, children: [] });
   const rootNode = nodes.get("m:" + trace.rootId);
@@ -173,7 +194,8 @@ function buildTree(trace: Trace): TreeNode | null {
 
   const parentKey = (item: TraceItem): string | null => {
     if (item.kind === "run") {
-      const key = item.run.triggerMessageId ? "m:" + item.run.triggerMessageId : null;
+      const anchor = anchors.get(item.run.id);
+      const key = anchor ? "m:" + anchor : null;
       return key && messageKeys.has(key) ? key : "m:" + trace.rootId;
     }
     if (item.kind === "message") {
