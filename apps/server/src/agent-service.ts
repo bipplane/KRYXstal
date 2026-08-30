@@ -300,14 +300,21 @@ export class AgentService {
     channels: Channel[];
     approvals: ApprovalRequest[];
     integrations: Database["integrations"];
+    typing: Array<{ agentId: string; channelId: string }>;
   } {
     const database = this.store.snapshot();
+    const typing = database.runs.flatMap((run) => {
+      if (run.status !== "running") return [];
+      const channelId = run.replyChannelId ?? run.channelId;
+      return channelId ? [{ agentId: run.agentId, channelId }] : [];
+    });
     return {
       user: { id: USER_ID, name: this.config.userName },
       agents: database.agents.sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
       channels: database.channels.filter((channel) => !channel.archivedAt),
       approvals: database.approvals.filter((approval) => approval.status === "pending"),
       integrations: database.integrations,
+      typing,
     };
   }
 
@@ -640,6 +647,40 @@ export class AgentService {
     throw new HttpError(409, "Channel #" + name + " already exists");
   }
 
+  async deleteChannel(id: string): Promise<Channel> {
+    const channel = this.getChannel(id);
+    if (channel.archivedAt) throw new HttpError(404, "Channel not found");
+    if (channel.kind !== "public" || channel.name === GENERAL_CHANNEL) {
+      throw new HttpError(409, "System, general and DM channels cannot be deleted");
+    }
+
+    const archived = await this.store.mutate((database) => {
+      const current = database.channels.find((item) => item.id === id);
+      if (!current || current.archivedAt) throw new HttpError(404, "Channel not found");
+      const activeRun = database.runs.some(
+        (run) =>
+          (run.status === "queued" || run.status === "running") &&
+          (run.channelId === id || run.replyChannelId === id),
+      );
+      if (activeRun) throw new HttpError(409, "Wait for active channel Runs to finish before deleting it");
+      const pendingApproval = database.approvals.some(
+        (approval) => approval.status === "pending" && approval.channelId === id,
+      );
+      if (pendingApproval) throw new HttpError(409, "Resolve pending channel approvals before deleting it");
+      current.archivedAt = now();
+      return structuredClone(current);
+    });
+    for (const memberId of archived.memberIds) {
+      if (memberId === USER_ID) continue;
+      const member = this.store.peek().agents.find((agent) => agent.id === memberId);
+      if (member) await this.workspaces.writeInstructions(member, this.instructionContext(member));
+      const pending = this.pendingWakes.get(memberId);
+      pending?.delete(id);
+      if (pending?.size === 0) this.pendingWakes.delete(memberId);
+    }
+    return archived;
+  }
+
   /** A conflict on a non-channel resource (a registry, an approval): compare-and-set failed. */
   private registryConflict(
     resource: string,
@@ -701,6 +742,7 @@ export class AgentService {
    */
   async postUserMessage(channelId: string, content: string): Promise<ChannelMessage> {
     const channel = this.getChannel(channelId);
+    if (channel.archivedAt) throw new HttpError(410, "Channel has been deleted");
     const lease = await this.sync.locks.acquire(channelKey(channel.id), USER_ID).catch((error) => {
       if (error instanceof LockTimeoutError) throw new HttpError(503, "Channel is busy, try again");
       throw error;

@@ -7,14 +7,15 @@ const NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
 
 interface IntegrationsPanelProps {
   integrations: Integration[];
+  startAdding?: boolean;
   onClose: () => void;
   /** Re-fetches the overview so the list reflects the server after each action. */
   onRefresh: () => Promise<void>;
 }
 
-export default function IntegrationsPanel({ integrations, onClose, onRefresh }: IntegrationsPanelProps) {
+export default function IntegrationsPanel({ integrations, startAdding = false, onClose, onRefresh }: IntegrationsPanelProps) {
   const now = useNow(10000);
-  const [adding, setAdding] = useState(integrations.length === 0);
+  const [adding, setAdding] = useState(startAdding || integrations.length === 0);
 
   return (
     <Modal title="Integrations" onClose={onClose} width={720}>

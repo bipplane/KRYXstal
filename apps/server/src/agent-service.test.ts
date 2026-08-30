@@ -116,6 +116,29 @@ describe("Principals and channels", () => {
     expect(instructions).toContain("ALLOW channel:read, channel:post on channel:deploys");
   });
 
+  it("deletes custom channels while preserving audit history and allowing name reuse", async () => {
+    const { service } = await makeService();
+    const channel = await service.createChannel({ name: "privacy-demo" });
+    await service.postUserMessage(channel.id, "audit evidence");
+
+    const archived = await service.deleteChannel(channel.id);
+    expect(archived.archivedAt).not.toBeNull();
+    expect(service.listChannels().map((item) => item.id)).not.toContain(channel.id);
+    expect(service.getMessages(channel.id)).toHaveLength(1);
+    await expect(service.postUserMessage(channel.id, "late write")).rejects.toMatchObject({ statusCode: 410 });
+
+    const replacement = await service.createChannel({ name: "privacy-demo" });
+    expect(replacement.id).not.toBe(channel.id);
+  });
+
+  it("protects general, system and DM channels from deletion", async () => {
+    const { service } = await makeService();
+    const agent = await service.createAgent({ name: "Builder" });
+    await expect(service.deleteChannel(service.getChannelByName("general").id)).rejects.toMatchObject({ statusCode: 409 });
+    await expect(service.deleteChannel(service.getChannelByName("approvals").id)).rejects.toMatchObject({ statusCode: 409 });
+    await expect(service.deleteChannel(agent.dmChannelId as string)).rejects.toMatchObject({ statusCode: 409 });
+  });
+
   it("runs a DM conversation through the channel scheduler and records events", async () => {
     const runner = new FakeRunner();
     const { service } = await makeService(runner);
@@ -176,6 +199,9 @@ describe("Principals and channels", () => {
     const agent = await service.createAgent({ name: "Busy" });
     await service.sendMessage(agent.id, "first");
     await expect.poll(() => service.getAgent(agent.id).status).toBe("busy");
+    await expect
+      .poll(() => service.overview().typing)
+      .toContainEqual({ agentId: agent.id, channelId: agent.dmChannelId });
     await expect(service.startAgent(agent.id)).rejects.toMatchObject({ statusCode: 409 });
     await service.sendMessage(agent.id, "second");
     await expect.poll(() => calls).toBe(1);

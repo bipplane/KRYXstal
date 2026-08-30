@@ -284,7 +284,7 @@ export default function AgentWizard({
   );
 
   return (
-    <Modal title={mode === "create" ? "New agent" : "Edit " + (agent?.name ?? "agent")} onClose={onClose} width={720} footer={footer}>
+    <Modal title={mode === "create" ? "New agent" : "Edit " + (agent?.name ?? "agent")} onClose={onClose} width={720} height={720} footer={footer}>
       <ol className="steps">
         {(["Identity", "Policy", "Channels"] as const).map((label, i) => {
           const n = (i + 1) as 1 | 2 | 3;

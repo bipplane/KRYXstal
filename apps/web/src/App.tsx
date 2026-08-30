@@ -58,7 +58,7 @@ export default function App() {
   const [traceMessageId, setTraceMessageId] = useState<string | null>(null);
   const [wizard, setWizard] = useState<WizardState | null>(null);
   const [channelDialog, setChannelDialog] = useState(false);
-  const [integrationsOpen, setIntegrationsOpen] = useState(false);
+  const [integrationsOpen, setIntegrationsOpen] = useState<"browse" | "add" | null>(null);
   const pickedDefault = useRef(false);
   const missingChannelPolls = useRef(0);
   const missingAgentPolls = useRef(0);
@@ -269,6 +269,15 @@ export default function App() {
     [refreshOverview],
   );
 
+  const deleteChannel = useCallback(
+    async (channel: Channel) => {
+      await api.deleteChannel(channel.id);
+      setSelectedChannelId((current) => (current === channel.id ? null : current));
+      await refreshOverview();
+    },
+    [refreshOverview],
+  );
+
   const resolveApproval = useCallback(
     async (approvalId: string, decision: ApprovalDecision) => {
       await api.resolveApproval(approvalId, decision);
@@ -326,7 +335,7 @@ export default function App() {
           onSelectAgent={selectAgentAndDm}
           onNewAgent={() => setWizard({ mode: "create" })}
           onNewChannel={() => setChannelDialog(true)}
-          onOpenIntegrations={() => setIntegrationsOpen(true)}
+          onOpenIntegrations={(startAdding = false) => setIntegrationsOpen(startAdding ? "add" : "browse")}
         />
         {traceMessageId ? (
           <TraceView
@@ -345,6 +354,7 @@ export default function App() {
             onOpenRun={openRun}
             onOpenTrace={openTrace}
             onResolveApproval={resolveApproval}
+            onDeleteChannel={deleteChannel}
           />
         )}
         <Inspector
@@ -387,7 +397,8 @@ export default function App() {
       {integrationsOpen ? (
         <IntegrationsPanel
           integrations={overview?.integrations ?? []}
-          onClose={() => setIntegrationsOpen(false)}
+          startAdding={integrationsOpen === "add"}
+          onClose={() => setIntegrationsOpen(null)}
           onRefresh={refreshOverview}
         />
       ) : null}
