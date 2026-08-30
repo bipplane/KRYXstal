@@ -33,6 +33,7 @@ import {
   NO_REPLY,
   quote,
   renderConflictFeedback,
+  STATE_KINDS,
   unseenMessages,
   type Lease,
   type SyncBackend,
@@ -948,6 +949,44 @@ export class AgentService {
     return conflict;
   }
 
+  /**
+   * Where an accepted channel post hangs in its chain. The message that woke a
+   * run is often not what the agent answered: with several agents racing, or a
+   * wake queued while it was busy, the channel has moved on by the time it
+   * replies, and read-before-act has made it see everything since. So the post
+   * follows the newest state-bearing message in that channel, from someone
+   * else, that the agent has been shown and that either belongs to the run's
+   * chain or addressed the agent (a newer prompt it read mid-turn; it would
+   * have woken it anyway). The wake message is the fallback. When the post
+   * joins a newer chain, the run and its decisions move with it, so a trace
+   * holds every turn that contributed to it.
+   */
+  private replyLineage(database: Database, agent: Agent, channel: Channel, runId: string | null): TraceContext {
+    const run = runId ? database.runs.find((item) => item.id === runId) : undefined;
+    if (!run) return {};
+    const seenSeq = this.sync.reads.get(agent.id, channelKey(channel.id));
+    let target: ChannelMessage | null = null;
+    for (const message of database.messages) {
+      if (message.channelId !== channel.id || message.seq > seenSeq || message.authorId === agent.id) continue;
+      if (!STATE_KINDS.has(message.kind) || (target !== null && message.seq < target.seq)) continue;
+      if (message.traceId !== run.traceId && !this.addresses(database, channel, agent, message)) continue;
+      target = message;
+    }
+    if (!target) return { traceId: run.traceId ?? undefined, parentMessageId: run.triggerMessageId };
+    if (run.traceId !== target.traceId) {
+      run.traceId = target.traceId;
+      for (const decision of database.decisions) {
+        if (decision.runId === run.id) decision.traceId = target.traceId;
+      }
+    }
+    return { traceId: target.traceId, parentMessageId: target.id };
+  }
+
+  /** Whether a message wakes the agent on its own: anything in a DM, an @mention or @everyone elsewhere. */
+  private addresses(database: Readonly<Database>, channel: Channel, agent: Agent, message: ChannelMessage): boolean {
+    return channel.kind === "dm" || mentions(message.content, agent.name, database.agents);
+  }
+
   private busyConflict(
     agent: Agent,
     channel: Channel,
@@ -1095,7 +1134,7 @@ export class AgentService {
           runId,
           approvalId: null,
           ...(expectsReply === undefined ? {} : { expectsReply }),
-          ...this.traceOfRun(runId),
+          ...this.replyLineage(database, agent, channel, runId),
         });
         this.sync.reads.advance(agent.id, channelKey(channel.id), message.seq);
         return message;
@@ -1898,9 +1937,11 @@ export class AgentService {
         : null;
     // A reply to a mention wakes the mentioner: if the message that woke this
     // author @mentioned it, the author of that message is waiting for an answer.
-    const parent = message.parentMessageId
-      ? database.messages.find((item) => item.id === message.parentMessageId)
-      : undefined;
+    // An agent's post hangs off the newest message it had seen, so the message
+    // that woke it is taken from its run.
+    const authorRun = message.runId ? database.runs.find((run) => run.id === message.runId) : undefined;
+    const wakeId = authorRun ? authorRun.triggerMessageId : message.parentMessageId;
+    const parent = wakeId ? database.messages.find((item) => item.id === wakeId) : undefined;
     const asker =
       parent && parent.authorId !== USER_ID && parent.authorId !== message.authorId
         ? database.agents.find((item) => item.id === parent.authorId)
@@ -2451,8 +2492,7 @@ export class AgentService {
               content: output,
               runId: run.id,
               approvalId: null,
-              traceId: run.traceId ?? undefined,
-              parentMessageId: run.triggerMessageId,
+              ...this.replyLineage(database, agent, channel, run.id),
             });
             this.sync.reads.advance(agent.id, channelKey(channel.id), posted.seq);
           }
