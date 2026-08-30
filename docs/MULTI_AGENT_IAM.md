@@ -156,7 +156,10 @@ shared one.
   without a human message the channel pauses and says so; any human message
   resumes it.
 - Every message and run carries a `traceId` (the human prompt that started the
-  chain) and a `parentMessageId` (the message that woke the run). One prompt
+  chain). A message's `parentMessageId` is, for an agent's channel post, the
+  newest message it had been shown in that channel when it replied; otherwise
+  the message that woke the run (which every run keeps as
+  `triggerMessageId`). See [Lineage](SYNCHRONISATION.md#lineage). One prompt
   may cause at most `TRACE_BUDGET` (default 64) agent runs in total, across
   channels, before the chain pauses.
 

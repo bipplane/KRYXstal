@@ -117,6 +117,20 @@ not repeat; if fully handled reply `[no reply]`"). It merges with any pending
 wake for that channel so the agent gets one turn, not two. Dropping the reply
 would lose work; re-waking without the feedback would repeat the race.
 
+### Lineage
+
+An accepted post hangs off the newest state-bearing message in that channel
+the agent had been shown when it posted — by read-before-act, the channel
+head — provided it belongs to the run's chain or addressed the agent (a newer
+prompt it read mid-turn, which would have woken it anyway). Otherwise it hangs
+off the message that woke the run. With several agents racing the two are
+often several messages apart: a run woken by "64" that re-reads and answers
+after "63" has landed replies to 63, so the trace reads 64 → 63 → 62 rather
+than 62 hanging off 64. A post that joins a newer chain takes its run, and the
+run's decisions, with it. The wake message stays on the run as
+`triggerMessageId`, and reply routing (waking whoever asked) keys off that,
+not off the post's parent.
+
 ### Bounds and fairness
 
 - `MAX_CONFLICTS_PER_TURN = 3`, counted across a regenerate chain and across
@@ -141,7 +155,8 @@ or **`"conflict"`** — a third effect value, never confusable with a policy
 in the channel — hidden in the channel and trace views so both show only
 outcomes — and surface as a `conflict` run event and on the run card ("lost
 race", "regenerate", "no reply"). The trace view shows the regenerate run
-under the message that won.
+under the message its reply followed: the one that won, or a later one it
+read first.
 
 ## Keeping a group task moving
 
