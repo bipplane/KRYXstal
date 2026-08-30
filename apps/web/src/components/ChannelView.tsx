@@ -15,6 +15,24 @@ interface ChannelViewProps {
 
 const POLL_MS = 1500;
 
+interface MentionMatch {
+  start: number;
+  end: number;
+  query: string;
+}
+
+function mentionAtCaret(value: string, caret: number): MentionMatch | null {
+  const beforeCaret = value.slice(0, caret);
+  const match = /(?:^|\s)@([a-zA-Z0-9/_-]*)$/.exec(beforeCaret);
+  if (!match) return null;
+  const token = match[1] ?? "";
+  return { start: caret - token.length - 1, end: caret, query: token.toLowerCase() };
+}
+
+function mentionSlug(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9/_-]+/g, "-");
+}
+
 export default function ChannelView({
   channel,
   overview,
@@ -30,7 +48,10 @@ export default function ChannelView({
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+  const [mention, setMention] = useState<MentionMatch | null>(null);
+  const [activeMention, setActiveMention] = useState(0);
   const listRef = useRef<HTMLDivElement | null>(null);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const stickToBottom = useRef(true);
   const lastMessageId = useRef<string | null>(null);
   const now = useNow(30000);
@@ -40,6 +61,7 @@ export default function ChannelView({
     setMessages([]);
     setError(null);
     setSendError(null);
+    setMention(null);
     setLoading(Boolean(channelId));
     stickToBottom.current = true;
     lastMessageId.current = null;
@@ -97,6 +119,7 @@ export default function ChannelView({
     try {
       const { message } = await api.sendMessage(channelId, content);
       setDraft("");
+      setMention(null);
       stickToBottom.current = true;
       setMessages((prev) => (prev.some((m) => m.id === message.id) ? prev : [...prev, message]));
     } catch (err) {
@@ -106,14 +129,64 @@ export default function ChannelView({
     }
   };
 
+  const agents = overview?.agents ?? [];
+  const callableAgents = channel
+    ? channel.memberIds
+        .map((id) => agents.find((agent) => agent.id === id))
+        .filter((agent): agent is Agent => agent !== undefined && agent.status !== "stopped" && agent.status !== "closed")
+    : [];
+  const mentionOptions = [
+    { id: "everyone", name: "everyone", token: "everyone", detail: "Notify all available members" },
+    ...callableAgents.map((agent) => ({
+      id: agent.id,
+      name: agent.name,
+      token: mentionSlug(agent.name),
+      detail: agent.kind === "session" ? "Session" : "Agent",
+    })),
+  ].filter((option) => !mention || option.name.toLowerCase().includes(mention.query) || option.token.includes(mention.query));
+
+  const updateMention = (value: string, caret: number) => {
+    setMention(mentionAtCaret(value, caret));
+    setActiveMention(0);
+  };
+
+  const insertMention = (token: string) => {
+    if (!mention) return;
+    const next = draft.slice(0, mention.start) + "@" + token + " " + draft.slice(mention.end);
+    const caret = mention.start + token.length + 2;
+    setDraft(next);
+    setMention(null);
+    window.requestAnimationFrame(() => {
+      composerRef.current?.focus();
+      composerRef.current?.setSelectionRange(caret, caret);
+    });
+  };
+
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (mention && mentionOptions.length > 0) {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const direction = event.key === "ArrowDown" ? 1 : -1;
+        setActiveMention((current) => (current + direction + mentionOptions.length) % mentionOptions.length);
+        return;
+      }
+      if (event.key === "Enter" || event.key === "Tab") {
+        event.preventDefault();
+        insertMention(mentionOptions[activeMention]?.token ?? mentionOptions[0].token);
+        return;
+      }
+    }
+    if (mention && event.key === "Escape") {
+      event.preventDefault();
+      setMention(null);
+      return;
+    }
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       void send();
     }
   };
 
-  const agents = overview?.agents ?? [];
   const members = channel
     ? channel.memberIds.map((id) => {
         if (id === "user") return { id, name: overview?.user.name ?? "You", kind: "user" as const };
@@ -195,14 +268,56 @@ export default function ChannelView({
       </div>
 
       <div className="composer">
-        <textarea
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={onKeyDown}
-          placeholder={"Message " + (isDm ? title : "#" + channel.name) + " — Enter to send, Shift+Enter for a new line"}
-          rows={2}
-          disabled={sending}
-        />
+        <div className="composer-input-wrap">
+          {mention ? (
+            <div className="mention-menu" role="listbox" aria-label="People you can mention">
+              {mentionOptions.length === 0 ? (
+                <div className="mention-empty">No matching people</div>
+              ) : (
+                mentionOptions.map((option, index) => (
+                  <button
+                    key={option.id}
+                    type="button"
+                    className={"mention-option" + (index === activeMention ? " mention-option-active" : "")}
+                    role="option"
+                    aria-selected={index === activeMention}
+                    onMouseDown={(event) => {
+                      event.preventDefault();
+                      insertMention(option.token);
+                    }}
+                    onMouseEnter={() => setActiveMention(index)}
+                  >
+                    <Avatar name={option.name} kind={option.id === "everyone" ? "user" : callableAgents.find((agent) => agent.id === option.id)?.kind ?? "principal"} size="sm" />
+                    <span className="mention-option-copy">
+                      <strong>@{option.token}</strong>
+                      <span>{option.detail}</span>
+                    </span>
+                  </button>
+                ))
+              )}
+            </div>
+          ) : null}
+          <textarea
+            ref={composerRef}
+            value={draft}
+            onChange={(e) => {
+              setDraft(e.target.value);
+              updateMention(e.target.value, e.target.selectionStart);
+            }}
+            onClick={(e) => updateMention(e.currentTarget.value, e.currentTarget.selectionStart)}
+            onKeyUp={(e) => {
+              if (["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(e.key)) return;
+              updateMention(e.currentTarget.value, e.currentTarget.selectionStart);
+            }}
+            onKeyDown={onKeyDown}
+            onBlur={() => setMention(null)}
+            placeholder={"Message " + (isDm ? title : "#" + channel.name) + " — Enter to send, Shift+Enter for a new line"}
+            rows={2}
+            disabled={sending}
+            aria-autocomplete="list"
+            aria-expanded={mention !== null}
+          />
+        </div>
         <div className="composer-foot">
           <span className="muted small">{sendError ? <span className="text-red">{sendError}</span> : "Posting as you"}</span>
           <button type="button" className="btn btn-primary" onClick={() => void send()} disabled={sending || !draft.trim()}>
