@@ -470,6 +470,150 @@ describe("Passing the turn (TURN_TAKING=on)", () => {
   });
 });
 
+describe("Reply lineage", () => {
+  it("hangs a reply off the newest message the agent had seen, not the message that woke it", async () => {
+    let service!: AgentService;
+    const general = () => service.getChannelByName("general").id;
+    const posted = (content: string) => service.getMessages(general()).some((m) => m.content === content);
+    const runner: AgentRunner = {
+      run: async (request) => {
+        if (service.getAgent(request.agentId).name === "AgentA") return { output: "one", threadId: null, usage: null };
+        // AgentB was woken by the same prompt but answers only after re-reading the channel with A's "one" in it.
+        await expect.poll(() => posted("one"), { timeout: 5_000 }).toBe(true);
+        await service.agentReadChannel(identity(request.agentId, request.runId), "general", 30);
+        return { output: "two", threadId: null, usage: null };
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    };
+    ({ service } = await makeService(runner));
+    await service.createAgent({ name: "AgentA" });
+    const b = await service.createAgent({ name: "AgentB" });
+    const root = await service.postUserMessage(general(), "@AgentA @AgentB go");
+    await expect.poll(() => posted("two") && !service.getTrace(root.id).live, { timeout: 5_000 }).toBe(true);
+    const one = service.getMessages(general()).find((m) => m.content === "one");
+    const two = service.getMessages(general()).find((m) => m.content === "two");
+    expect(one?.parentMessageId).toBe(root.id);
+    expect(two?.parentMessageId).toBe(one?.id);
+    expect(two?.traceId).toBe(root.id);
+    // What woke the run is still recorded on the run itself.
+    expect(service.getRuns(b.id)[0]).toMatchObject({ triggerMessageId: root.id, conflicts: 0 });
+  });
+
+  it("moves a turn into the newer chain it answered after reading it mid-turn", async () => {
+    let service!: AgentService;
+    const general = () => service.getChannelByName("general").id;
+    let turns = 0;
+    const runner: AgentRunner = {
+      run: async (request) => {
+        turns += 1;
+        if (turns > 1) return { output: "[no reply]", threadId: null, usage: null };
+        // Woken by the first prompt, the agent sees a second one arrive, re-reads, and answers that instead.
+        await expect
+          .poll(() => service.getMessages(general()).filter((m) => m.authorKind === "user").length, { timeout: 5_000 })
+          .toBe(2);
+        await service.agentReadChannel(identity(request.agentId, request.runId), "general", 30);
+        return { output: "67 @everyone", threadId: null, usage: null };
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    };
+    ({ service } = await makeService(runner));
+    const a = await service.createAgent({ name: "AgentA" });
+    const first = await service.postUserMessage(general(), "@AgentA count down from 10");
+    await expect.poll(() => service.getAgent(a.id).status, { timeout: 5_000 }).toBe("busy");
+    const second = await service.postUserMessage(general(), "@everyone count down from 67 instead");
+    await expect
+      .poll(() => service.getRuns(a.id).filter((run) => run.status === "completed").length, { timeout: 5_000 })
+      .toBe(2);
+    const reply = service.getMessages(general()).find((m) => m.content.startsWith("67"));
+    expect(reply).toMatchObject({ traceId: second.id, parentMessageId: second.id });
+    // The wake is unchanged; the turn, and every decision it made, now belong to the chain it answered.
+    const turn = service.getRuns(a.id).find((run) => run.output === "67 @everyone");
+    expect(turn).toMatchObject({ triggerMessageId: first.id, traceId: second.id });
+    const trace = service.getTrace(second.id);
+    expect(trace.runs.map((run) => run.id)).toContain(turn?.id);
+    expect(trace.decisions.filter((d) => d.runId === turn?.id).map((d) => d.tool + ":" + d.effect)).toEqual([
+      "read_channel:allow",
+      "auto_post:allow",
+    ]);
+    expect(service.getTrace(first.id).runs).toHaveLength(0);
+  });
+
+  it("keeps a reply in its own chain when the newer message did not address the agent", async () => {
+    let service!: AgentService;
+    const general = () => service.getChannelByName("general").id;
+    const posted = (content: string) => service.getMessages(general()).some((m) => m.content === content);
+    const runner: AgentRunner = {
+      run: async (request) => {
+        if (service.getAgent(request.agentId).name === "AgentB") return { output: "on it", threadId: null, usage: null };
+        // AgentA sees an unrelated prompt for AgentB land while it works, re-reads, and finishes its own task.
+        await expect.poll(() => posted("on it"), { timeout: 5_000 }).toBe(true);
+        await service.agentReadChannel(identity(request.agentId, request.runId), "general", 30);
+        return { output: "done", threadId: null, usage: null };
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    };
+    ({ service } = await makeService(runner));
+    const a = await service.createAgent({ name: "AgentA" });
+    await service.createAgent({ name: "AgentB" });
+    const first = await service.postUserMessage(general(), "@AgentA tidy the workspace");
+    const second = await service.postUserMessage(general(), "@AgentB check the build");
+    await expect
+      .poll(() => posted("done") && !service.getTrace(first.id).live && !service.getTrace(second.id).live, { timeout: 5_000 })
+      .toBe(true);
+    const done = service.getMessages(general()).find((m) => m.content === "done");
+    const onIt = service.getMessages(general()).find((m) => m.content === "on it");
+    expect(done).toMatchObject({ traceId: first.id, parentMessageId: first.id });
+    expect(onIt).toMatchObject({ traceId: second.id, parentMessageId: second.id });
+    expect(service.getRuns(a.id)[0]?.traceId).toBe(first.id);
+    expect(service.getTrace(first.id).messages.map((m) => m.content)).toEqual(["@AgentA tidy the workspace", "done"]);
+    expect(service.getTrace(second.id).messages.map((m) => m.content)).toEqual(["@AgentB check the build", "on it"]);
+  });
+
+  it("still wakes the asker when the answer followed a later message than the question", async () => {
+    let service!: AgentService;
+    const general = () => service.getChannelByName("general").id;
+    const posted = (content: string) => service.getMessages(general()).some((m) => m.content === content);
+    let askerTurns = 0;
+    const runner: AgentRunner = {
+      run: async (request) => {
+        const who = identity(request.agentId, request.runId);
+        if (service.getAgent(request.agentId).name === "Asker") {
+          askerTurns += 1;
+          if (askerTurns > 1) return { output: "Answerer says 5.", threadId: "asker", usage: null };
+          await service.agentPostMessage(who, "general", "@Answerer what is X?");
+          await service.agentPostMessage(who, "general", "No rush, Answerer.");
+          return { output: "Asked Answerer; waiting.", threadId: "asker", usage: null };
+        }
+        // Answerer replies only after the follow-up, so its answer follows that rather than the question.
+        await expect.poll(() => posted("No rush, Answerer."), { timeout: 5_000 }).toBe(true);
+        await service.agentReadChannel(who, "general", 30);
+        return { output: "X is 5.", threadId: "answerer", usage: null };
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    };
+    ({ service } = await makeService(runner));
+    const asker = await service.createAgent({ name: "Asker" });
+    await service.createAgent({ name: "Answerer" });
+    const root = await service.sendMessage(asker.id, "ask Answerer what X is and tell me");
+    await expect
+      .poll(() => service.getTrace(root.message.id).runs.filter((run) => run.status === "completed").length, {
+        timeout: 5_000,
+      })
+      .toBe(3);
+    const messages = service.getMessages(general());
+    const followUp = messages.find((m) => m.content === "No rush, Answerer.");
+    const answer = messages.find((m) => m.content === "X is 5.");
+    expect(answer?.parentMessageId).toBe(followUp?.id);
+    // Routing still keys off the question that woke Answerer: Asker is woken and reports back in its DM.
+    expect(service.getRuns(asker.id)[0]).toMatchObject({ triggerMessageId: answer?.id, replyChannelId: asker.dmChannelId });
+    expect(service.getMessages(asker.dmChannelId as string).at(-1)?.content).toBe("Answerer says 5.");
+  });
+});
+
 /**
  * A fake model for the countdown. It reads its prompt the way a model would —
  * numbers other agents posted, what beat it, what of its own was rejected —
@@ -545,6 +689,9 @@ describe("Countdown demo", () => {
     ({ service } = await makeService(countdownRunner(() => service, N, " @everyone")));
     const { numbers, trace } = await runCountdown(service, N);
     expect(numbers).toEqual([10, 9, 8, 7, 6, 5, 4, 3, 2, 1]);
+    // Each accepted number follows the one before it, whatever woke the run that posted it.
+    const posts = trace.messages.filter((m) => m.kind === "message" && m.authorKind !== "user");
+    expect(posts.map((m) => m.parentMessageId)).toEqual([trace.rootId, ...posts.slice(0, -1).map((m) => m.id)]);
     // Every step is a race between all N: conflicts on most steps, all resolved by regenerating.
     expect(trace.messages.filter((m) => m.kind === "conflict").length).toBeGreaterThanOrEqual(N - 1);
     expect(trace.runs.some((run) => run.trigger === "conflict")).toBe(true);
@@ -560,6 +707,9 @@ describe("Countdown demo", () => {
     ({ service } = await makeService(countdownRunner(() => service, N, ""), createInMemorySync(), { TURN_TAKING: "on" }));
     const { numbers, trace } = await runCountdown(service, N);
     expect(numbers).toEqual([10, 9, 8, 7, 6, 5, 4, 3, 2, 1]);
+    // Each accepted number follows the one before it, whatever woke the run that posted it.
+    const posts = trace.messages.filter((m) => m.kind === "message" && m.authorKind !== "user");
+    expect(posts.map((m) => m.parentMessageId)).toEqual([trace.rootId, ...posts.slice(0, -1).map((m) => m.id)]);
     expect(trace.messages.filter((m) => m.kind === "conflict").length).toBeGreaterThanOrEqual(N - 1);
     expect(trace.runs.length).toBeLessThanOrEqual(24);
     expect(trace.messages.some((m) => m.content.startsWith("Paused"))).toBe(false);
