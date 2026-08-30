@@ -221,6 +221,12 @@ export async function createApp(
     return reply.code(201).send({ channel: await service.createChannel(body) });
   });
 
+  app.delete("/api/channels/:id", async (request) => {
+    const { id } = idParams.parse(request.params);
+    await service.deleteChannel(id);
+    return { ok: true };
+  });
+
   app.get("/api/channels/:id/messages", async (request) => {
     const { id } = idParams.parse(request.params);
     const query = messagesQuery.parse(request.query);

@@ -739,6 +739,13 @@ textarea {
 .channel-head-main {
   min-width: 0;
 }
+.channel-head-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
 .channel-title {
   font-size: 16px;
   font-weight: 700;

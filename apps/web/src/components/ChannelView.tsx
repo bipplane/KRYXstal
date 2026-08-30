@@ -11,6 +11,7 @@ interface ChannelViewProps {
   onOpenRun: (agentId: string, runId: string) => void;
   onOpenTrace: (messageId: string) => void;
   onResolveApproval: (approvalId: string, decision: ApprovalDecision) => Promise<void>;
+  onDeleteChannel: (channel: Channel) => Promise<void>;
 }
 
 const POLL_MS = 1500;
@@ -46,6 +47,7 @@ export default function ChannelView({
   onOpenRun,
   onOpenTrace,
   onResolveApproval,
+  onDeleteChannel,
 }: ChannelViewProps) {
   const channelId = channel?.id ?? null;
   const [messages, setMessages] = useState<ChannelMessage[]>([]);
@@ -56,6 +58,9 @@ export default function ChannelView({
   const [sendError, setSendError] = useState<string | null>(null);
   const [mention, setMention] = useState<MentionMatch | null>(null);
   const [activeMention, setActiveMention] = useState(0);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const stickToBottom = useRef(true);
@@ -68,6 +73,8 @@ export default function ChannelView({
     setError(null);
     setSendError(null);
     setMention(null);
+    setConfirmDelete(false);
+    setDeleteError(null);
     setLoading(Boolean(channelId));
     stickToBottom.current = true;
     lastMessageId.current = null;
@@ -209,6 +216,20 @@ export default function ChannelView({
       .filter((name): name is string => name !== undefined),
   )];
 
+  const removeChannel = async () => {
+    if (!channel || deleting) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await onDeleteChannel(channel);
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : "Failed to delete channel");
+      setConfirmDelete(false);
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   if (!channel) {
     return (
       <main className="main">
@@ -234,17 +255,43 @@ export default function ChannelView({
           </h1>
           {channel.description ? <p className="channel-desc">{channel.description}</p> : null}
         </div>
-        <div className="channel-members" title={members.map((m) => m.name).join(", ")}>
-          <div className="avatar-stack">
-            {members.slice(0, 6).map((m) => (
-              <Avatar key={m.id} name={m.name} kind={m.kind} size="sm" />
-            ))}
+        <div className="channel-head-actions">
+          <div className="channel-members" title={members.map((m) => m.name).join(", ")}>
+            <div className="avatar-stack">
+              {members.slice(0, 6).map((m) => (
+                <Avatar key={m.id} name={m.name} kind={m.kind} size="sm" />
+              ))}
+            </div>
+            <span className="muted small">
+              {members.length} {members.length === 1 ? "member" : "members"}
+            </span>
           </div>
-          <span className="muted small">
-            {members.length} {members.length === 1 ? "member" : "members"}
-          </span>
+          {channel.kind === "public" && channel.name !== "general" ? (
+            confirmDelete ? (
+              <span className="confirm-inline">
+                <span>Delete #{channel.name}?</span>
+                <button type="button" className="btn btn-danger btn-sm" disabled={deleting} onClick={() => void removeChannel()}>
+                  {deleting ? "Deleting…" : "Confirm"}
+                </button>
+                <button type="button" className="btn btn-sm" disabled={deleting} onClick={() => setConfirmDelete(false)}>
+                  Cancel
+                </button>
+              </span>
+            ) : (
+              <button
+                type="button"
+                className="btn btn-sm btn-danger-ghost"
+                title="Hide this channel and preserve its audit history"
+                onClick={() => setConfirmDelete(true)}
+              >
+                Delete channel
+              </button>
+            )
+          ) : null}
         </div>
       </header>
+
+      <ErrorNote message={deleteError} />
 
       <div className="message-list" ref={listRef} onScroll={onScroll}>
         {loading && messages.length === 0 ? (

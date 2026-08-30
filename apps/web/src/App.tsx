@@ -269,6 +269,15 @@ export default function App() {
     [refreshOverview],
   );
 
+  const deleteChannel = useCallback(
+    async (channel: Channel) => {
+      await api.deleteChannel(channel.id);
+      setSelectedChannelId((current) => (current === channel.id ? null : current));
+      await refreshOverview();
+    },
+    [refreshOverview],
+  );
+
   const resolveApproval = useCallback(
     async (approvalId: string, decision: ApprovalDecision) => {
       await api.resolveApproval(approvalId, decision);
@@ -345,6 +354,7 @@ export default function App() {
             onOpenRun={openRun}
             onOpenTrace={openTrace}
             onResolveApproval={resolveApproval}
+            onDeleteChannel={deleteChannel}
           />
         )}
         <Inspector

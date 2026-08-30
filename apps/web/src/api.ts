@@ -100,6 +100,8 @@ export const api = {
     ),
   createChannel: (body: { name: string; description: string; memberIds: string[] }) =>
     request<{ channel: Channel }>("/api/channels", json("POST", body)),
+  deleteChannel: (channelId: string) =>
+    request<{ ok: true }>("/api/channels/" + encodeURIComponent(channelId), { method: "DELETE" }),
 
   resolveApproval: (id: string, decision: ApprovalDecision) =>
     request<{ approval: ApprovalRequest }>(
