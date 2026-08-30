@@ -300,14 +300,21 @@ export class AgentService {
     channels: Channel[];
     approvals: ApprovalRequest[];
     integrations: Database["integrations"];
+    typing: Array<{ agentId: string; channelId: string }>;
   } {
     const database = this.store.snapshot();
+    const typing = database.runs.flatMap((run) => {
+      if (run.status !== "running") return [];
+      const channelId = run.replyChannelId ?? run.channelId;
+      return channelId ? [{ agentId: run.agentId, channelId }] : [];
+    });
     return {
       user: { id: USER_ID, name: this.config.userName },
       agents: database.agents.sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
       channels: database.channels.filter((channel) => !channel.archivedAt),
       approvals: database.approvals.filter((approval) => approval.status === "pending"),
       integrations: database.integrations,
+      typing,
     };
   }
 

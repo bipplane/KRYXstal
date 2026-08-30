@@ -10,7 +10,7 @@ interface SidebarProps {
   onSelectAgent: (agent: Agent) => void;
   onNewAgent: () => void;
   onNewChannel: () => void;
-  onOpenIntegrations: () => void;
+  onOpenIntegrations: (startAdding?: boolean) => void;
 }
 
 export default function Sidebar({
@@ -110,6 +110,9 @@ export default function Sidebar({
         <div className="nav-group">
           <div className="nav-group-head">
             <span>Agents</span>
+            <button type="button" className="link-btn" onClick={onNewAgent}>
+              + New agent
+            </button>
           </div>
           {agents.length === 0 ? (
             <div className="nav-empty">No agents yet. Create one to get started.</div>
@@ -127,8 +130,8 @@ export default function Sidebar({
         <div className="nav-group">
           <div className="nav-group-head">
             <span>Integrations</span>
-            <button type="button" className="link-btn" onClick={onOpenIntegrations}>
-              {integrations.length === 0 ? "+ Add" : "Manage"}
+            <button type="button" className="link-btn" onClick={() => onOpenIntegrations(true)}>
+              + Add integration
             </button>
           </div>
           {integrations.length === 0 ? (
@@ -140,7 +143,7 @@ export default function Sidebar({
                   <button
                     type="button"
                     className="nav-item integ-nav"
-                    onClick={onOpenIntegrations}
+                    onClick={() => onOpenIntegrations(false)}
                     title={integration.status + (integration.lastError ? ": " + integration.lastError : "")}
                   >
                     <span className={"integ-dot integ-dot-" + integration.status} />
@@ -154,11 +157,6 @@ export default function Sidebar({
         </div>
       </nav>
 
-      <div className="sidebar-foot">
-        <button type="button" className="btn btn-primary btn-block" onClick={onNewAgent}>
-          + New agent
-        </button>
-      </div>
     </aside>
   );
 }

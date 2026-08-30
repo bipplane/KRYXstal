@@ -33,6 +33,12 @@ function mentionSlug(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9/_-]+/g, "-");
 }
 
+function typingLabel(names: string[]): string {
+  if (names.length === 1) return names[0] + " is typing";
+  if (names.length === 2) return names[0] + " and " + names[1] + " are typing";
+  return names.slice(0, -1).join(", ") + " and " + names[names.length - 1] + " are typing";
+}
+
 export default function ChannelView({
   channel,
   overview,
@@ -196,6 +202,12 @@ export default function ChannelView({
           : { id, name: id, kind: "principal" as const };
       })
     : [];
+  const typingNames = [...new Set(
+    (overview?.typing ?? [])
+      .filter((entry) => entry.channelId === channelId)
+      .map((entry) => agents.find((agent) => agent.id === entry.agentId)?.name)
+      .filter((name): name is string => name !== undefined),
+  )];
 
   if (!channel) {
     return (
@@ -268,6 +280,18 @@ export default function ChannelView({
       </div>
 
       <div className="composer">
+        <div className="typing-indicator-slot">
+          {typingNames.length > 0 ? (
+            <div className="typing-indicator" role="status" aria-live="polite">
+              <span>{typingLabel(typingNames)}</span>
+              <span className="typing-dots" aria-hidden="true">
+                <i />
+                <i />
+                <i />
+              </span>
+            </div>
+          ) : null}
+        </div>
         <div className="composer-input-wrap">
           {mention ? (
             <div className="mention-menu" role="listbox" aria-label="People you can mention">

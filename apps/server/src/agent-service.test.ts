@@ -176,6 +176,9 @@ describe("Principals and channels", () => {
     const agent = await service.createAgent({ name: "Busy" });
     await service.sendMessage(agent.id, "first");
     await expect.poll(() => service.getAgent(agent.id).status).toBe("busy");
+    await expect
+      .poll(() => service.overview().typing)
+      .toContainEqual({ agentId: agent.id, channelId: agent.dmChannelId });
     await expect(service.startAgent(agent.id)).rejects.toMatchObject({ statusCode: 409 });
     await service.sendMessage(agent.id, "second");
     await expect.poll(() => calls).toBe(1);

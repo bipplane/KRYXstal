@@ -268,6 +268,7 @@ export interface Overview {
   channels: Channel[];
   approvals: ApprovalRequest[];
   integrations: Integration[];
+  typing: Array<{ agentId: string; channelId: string }>;
 }
 
 export interface AgentInput {
