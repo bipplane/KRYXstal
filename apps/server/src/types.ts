@@ -17,6 +17,8 @@ export const ACTIONS = [
   "agent:close",
   "principal:request",
   "capability:request",
+  "artifact:publish",
+  "artifact:read",
 ] as const;
 export type Action = (typeof ACTIONS)[number];
 
@@ -254,6 +256,23 @@ export interface CapabilityGrant {
   createdAt: string;
 }
 
+export interface ReviewArtifactFile {
+  path: string;
+  size: number;
+  sha256: string;
+}
+
+export interface ReviewArtifactManifest {
+  artifactId: string;
+  publisherAgentId: string;
+  publisherRunId: string;
+  publisherTraceId: string | null;
+  paths: string[];
+  files: ReviewArtifactFile[];
+  note: string | null;
+  createdAt: string;
+}
+
 export interface Database {
   version: 2;
   agents: Agent[];
@@ -264,6 +283,7 @@ export interface Database {
   runs: AgentRun[];
   decisions: Decision[];
   approvals: ApprovalRequest[];
+  reviewArtifacts: ReviewArtifactManifest[];
 }
 
 export interface AgentInput {

@@ -13,6 +13,7 @@ const emptyDatabase = (): Database => ({
   runs: [],
   decisions: [],
   approvals: [],
+  reviewArtifacts: [],
 });
 
 interface LegacyAgent {

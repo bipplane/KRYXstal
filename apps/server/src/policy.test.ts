@@ -134,6 +134,14 @@ describe("Tool call mapping", () => {
       action: "agent:spawn",
       resource: "*",
     });
+    expect(mapToolCall("mcp__launchpad__publish_for_review", { paths: ["src/a.ts"] })).toEqual({
+      action: "artifact:publish",
+      resource: "artifact:*",
+    });
+    expect(mapToolCall("mcp__launchpad__read_review_artifact", { artifact_id: "artifact-id" })).toEqual({
+      action: "artifact:read",
+      resource: "artifact:artifact-id",
+    });
     expect(mapToolCall("update_plan", {})).toBeNull();
     expect(mapToolCall("mcp__linear__create_issue", { title: "x" })).toEqual({
       action: "mcp:linear:create_issue",

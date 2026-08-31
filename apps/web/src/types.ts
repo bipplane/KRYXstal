@@ -18,6 +18,8 @@ export const ACTIONS = [
   "agent:close",
   "principal:request",
   "capability:request",
+  "artifact:publish",
+  "artifact:read",
 ] as const;
 export type Action = (typeof ACTIONS)[number];
 

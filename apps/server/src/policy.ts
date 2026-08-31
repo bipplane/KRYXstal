@@ -32,6 +32,7 @@ export const PRESETS: Record<Exclude<Policy["preset"], "custom">, Policy> = {
       { effect: "allow", actions: ["shell:exec", "fs:write"], resources: ["*"] },
       { effect: "allow", actions: ["agent:spawn", "agent:close"], resources: ["*"] },
       { effect: "allow", actions: ["principal:request", "capability:request"], resources: ["*"] },
+      { effect: "allow", actions: ["artifact:publish"], resources: ["artifact:*"] },
       {
         effect: "deny",
         actions: ["shell:exec"],
@@ -48,6 +49,7 @@ export const PRESETS: Record<Exclude<Policy["preset"], "custom">, Policy> = {
       { effect: "allow", actions: ["shell:exec", "fs:write", "net:access"], resources: ["*"] },
       { effect: "allow", actions: ["agent:spawn", "agent:close"], resources: ["*"] },
       { effect: "allow", actions: ["principal:request", "capability:request"], resources: ["*"] },
+      { effect: "allow", actions: ["artifact:publish", "artifact:read"], resources: ["artifact:*"] },
       { effect: "deny", actions: ["shell:exec"], resources: ["cmd:rm -rf /", "cmd:sudo"] },
     ],
     delegable: ["channel:read", "channel:post", "shell:exec", "fs:write", "net:access"],
@@ -378,6 +380,13 @@ export function mapToolCall(toolName: string, toolInput: unknown): ToolCallMappi
         return { action: "principal:request", resource: "*" };
       case "request_capability":
         return { action: "capability:request", resource: "*" };
+      case "publish_for_review":
+        return { action: "artifact:publish", resource: "artifact:*" };
+      case "read_review_artifact":
+        return {
+          action: "artifact:read",
+          resource: "artifact:" + (stringArgument(toolInput, ["artifact_id"]) || "*"),
+        };
       default:
         return { action: "tool:launchpad:" + tool, resource: "*" };
     }

@@ -390,6 +390,7 @@ describe("Traces", () => {
       .poll(() => service.getTrace(root.id).runs.filter((run) => run.status === "completed").length)
       .toBe(2);
     await expect.poll(() => service.getTrace(root.id).messages.length).toBe(4);
+    await expect.poll(() => service.getTrace(root.id).decisions.filter((d) => d.source === "sync").length).toBe(3);
     const trace = service.getTrace(root.id);
     expect(trace.live).toBe(false);
     expect(trace.rootId).toBe(root.id);

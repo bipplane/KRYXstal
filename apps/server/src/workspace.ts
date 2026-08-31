@@ -103,6 +103,15 @@ export class WorkspaceManager {
       context.tools.includes("request_capability")
         ? "- If a task needs a capability your policy lacks (a denied command, network, a tool), call `request_capability` with the action and why, then end your turn. The human decides in your channel: allow once (your next turn), allow forever, or deny; you are woken with the decision."
         : "",
+      context.tools.includes("publish_for_review")
+        ? "- Developer handoff: call `publish_for_review` with every claimed source and test file, then post returned exact artifact ID to Reviewer. Never claim unpublished files were reviewed."
+        : "",
+      context.tools.includes("read_review_artifact")
+        ? "- Reviewer handoff: call `read_review_artifact` with exact artifact ID supplied by Developer; omit `path` to inspect manifest, then read listed source/tests and independently inspect or run published tests."
+        : "",
+      !context.tools.includes("read_review_artifact") && context.tools.includes("request_capability")
+        ? "- Reviewer handoff requiring approval: when Developer supplies an exact review artifact ID, call `request_capability` for action `artifact:read` and resource `artifact:<exact-id>`, explain the review need, then end your turn. If approved, your next run exposes `read_review_artifact`; list the manifest before reading exact files."
+        : "",
       "",
       "## Working alongside other agents",
       "",

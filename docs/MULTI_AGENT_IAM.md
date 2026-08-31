@@ -17,7 +17,7 @@ human (user) ──creates──▶ principal ──spawns──▶ session ─�
 | **Principal** | Created only by the human. Durable identity, own DM channel, own workspace, own Codex thread. Policy is authored in the wizard (preset + optional edits). |
 | **Session** | Spawned by an agent via the `spawn_agent` tool. Identity is `parent/name`; `principalId` points at the root principal. Policy is derived (see below). Closed by its parent, by the human, or when the parent is deleted (cascades). Max depth 3. |
 | **Policy** | `{ preset, statements[], delegable[] }`. A statement is `{ effect: allow \| deny, actions[], resources[] }`. Explicit deny wins, then any matching allow, else implicit deny. |
-| **Actions** | `channel:read`, `channel:post`, `channel:create`, `shell:exec`, `fs:write`, `net:access`, `agent:spawn`, `agent:close`, `principal:request`. |
+| **Actions** | `channel:read`, `channel:post`, `channel:create`, `shell:exec`, `fs:write`, `net:access`, `agent:spawn`, `agent:close`, `principal:request`, `capability:request`, `artifact:publish`, `artifact:read`. |
 | **Resources** | `channel:<name>`, `cmd:<argv prefix>` (token-prefix match: `cmd:rm -rf` covers `rm -rf /x`, not `rm -r`), or `*`. |
 | **Channel** | `public`, `dm`, or `system` (`#approvals`). Membership is checked in addition to policy. Ticking a channel in the wizard adds `channel:read`/`channel:post` on it. |
 
@@ -39,9 +39,9 @@ long-lived agent call `request_principal`, which posts an approval card to
 
 | Preset | Grants | Denies | Delegable |
 | --- | --- | --- | --- |
-| `reader` | read channels, run commands (read-only sandbox) | `rm -rf`, `sudo`, `git push`, `curl`, `wget`; `fs:write`; `net:access` | none |
-| `worker` | read/post channels, shell, fs:write, spawn/close, request principal | same command denies; `net:access` | channel:*, shell:exec, fs:write |
-| `deployer` | worker + `net:access` | `rm -rf /`, `sudo` | + net:access |
+| `reader` | read channels, run commands (read-only sandbox), request capabilities | `rm -rf`, `sudo`, `git push`, `curl`, `wget`; `fs:write`; `net:access`; artefact read is implicit-deny until approved | none |
+| `worker` | read/post channels, shell, fs:write, publish review artefacts, spawn/close, request principal | same command denies; `net:access` | channel:*, shell:exec, fs:write |
+| `deployer` | worker + `net:access` + read review artefacts | `rm -rf /`, `sudo` | + net:access |
 | `admin` | everything | — | `*` |
 
 ### Escalation: asking for a capability
@@ -183,6 +183,8 @@ indented timeline with channel hops marked.
 | `POST /api/agent/spawn` | `spawn_agent` | `agent:spawn` + delegation rules |
 | `POST /api/agent/close` | `close_agent` | `agent:close` + ancestor of target |
 | `POST /api/agent/requests` | `request_principal` | `principal:request` → `#approvals` |
+| `POST /api/agent/review-artifacts` | `publish_for_review` | `artifact:publish`; source validation and limits |
+| `GET /api/agent/review-artifacts/:artifactId` | `read_review_artifact` | `artifact:read`; allowlist and hash verification |
 
 ## Demo script
 
@@ -203,8 +205,22 @@ indented timeline with channel hops marked.
 ## Limitations
 
 - Single-user control plane; the human is one hard-coded principal.
-- Session workspaces are separate from the parent's; hand files over through
-  channel messages or shared instructions.
+- Session workspaces are separate from the parent's; use immutable review artefacts for file handoff.
 - Rules cover literal command prefixes only; the hook sees the full command
   string and is the authoritative check for compound shell scripts.
 - Policy changes apply from the next turn (each turn re-renders `$CODEX_HOME`).
+# Secure review-artifact handoff
+
+Agent workspaces remain isolated. Review files cross that boundary only through immutable, explicitly published artefacts:
+
+1. Developer calls `publish_for_review` with claimed source and test paths relative to Developer workspace, plus optional note.
+2. Tool returns generated artifact ID and SHA-256 manifest metadata. Developer posts exact artifact ID to Reviewer.
+3. Reviewer calls `read_review_artifact` without `path` to list manifest, then calls it with exact listed paths. Every read rechecks stored size and SHA-256. Reviewer independently inspects code and runs or assesses published tests.
+
+Storage lives at `APP_DATA_DIR/review-artifacts/<artifact-id>/`, outside every `AGENT_WORKSPACE_ROOT/<agent-id>` workspace. Each directory contains read-only `manifest.json` and published files under `files/`, preserving safe relative paths. Publication uses private staging directory plus atomic rename; IDs are generated UUIDs and existing artefacts are never overwritten. Metadata also persists through atomic existing JSON-store convention.
+
+Default limits: 50 files, 10 MiB total publication size, 1 MiB per read response. Configure with `REVIEW_ARTIFACT_MAX_FILES`, `REVIEW_ARTIFACT_MAX_TOTAL_BYTES`, and `REVIEW_ARTIFACT_MAX_RESPONSE_BYTES`.
+
+IAM actions: `artifact:publish` and `artifact:read`, scoped as `artifact:*` or `artifact:<id>`. Worker preset receives publish only. Reader preset (Reviewer role) requests `artifact:read` for the exact supplied ID; human approval exposes the tool for the next run, and an Allow once grant then expires. Deployer receives both; admin wildcard remains unchanged. Tools appear only where policy may grant corresponding action. All allow/deny decisions enter normal decision audit with run/trace lineage.
+
+Security boundary: only listed regular files may cross. Absolute paths, traversal, empty/dot segments, symlinks (including parent components), directories, missing files, unlisted files, environment/credential/auth/log/key/database/Codex-home material are rejected. Read side validates IDs and paths, blocks links, compares disk manifest with stored metadata, verifies SHA-256 before response, and never writes publisher workspace or artefact. This mechanism adds no peer workspace mount, host-path API, sandbox exception, hook bypass, or approval bypass.

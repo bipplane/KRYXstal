@@ -47,7 +47,11 @@ const agent = (preset: "reader" | "worker" | "deployer" | "admin"): Agent => ({
 
 describe("Per-agent $CODEX_HOME", () => {
   it("exposes only the MCP tools the policy can ever grant", () => {
-    expect(enabledMcpTools(agent("reader"))).toEqual(["list_channels", "read_channel", "request_capability"]);
+    expect(enabledMcpTools(agent("reader"))).toEqual([
+      "list_channels",
+      "read_channel",
+      "request_capability",
+    ]);
     expect(enabledMcpTools(agent("worker"))).toEqual([
       "list_channels",
       "read_channel",
@@ -56,6 +60,7 @@ describe("Per-agent $CODEX_HOME", () => {
       "close_agent",
       "request_principal",
       "request_capability",
+      "publish_for_review",
     ]);
     expect(enabledMcpTools(agent("admin"))).toContain("create_channel");
   });
@@ -95,7 +100,13 @@ describe("Per-agent $CODEX_HOME", () => {
     const dir = await mkdtemp(path.join(tmpdir(), "codex-home-"));
     temporaryDirectories.push(dir);
     await renderCodexHome({ dir, config: local, agent: agent("worker"), scriptsDir: "/o" });
-    expect(await readlink(path.join(dir, "auth.json"))).toBe(path.join(home, "auth.json"));
+    try {
+      expect(await readlink(path.join(dir, "auth.json"))).toBe(path.join(home, "auth.json"));
+    } catch (error) {
+      // Windows without Developer Mode cannot create symlinks; production deliberately copies instead.
+      if ((error as NodeJS.ErrnoException).code !== "EINVAL") throw error;
+      expect(await readFile(path.join(dir, "auth.json"), "utf8")).toBe("{}");
+    }
     await renderCodexHome({ dir, config: local, agent: agent("worker"), scriptsDir: "/o" });
     const empty = await mkdtemp(path.join(tmpdir(), "no-auth-"));
     temporaryDirectories.push(empty);
