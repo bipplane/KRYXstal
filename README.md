@@ -1,8 +1,10 @@
-## Volc Agent Launchpad
+# KRYXstal — clear middleware for Agent runs
 
-A minimal Agent platform for three-day middleware hackathons. It provides Agent
-CRUD, a browser Playground, persistent workspaces, and Codex CLI backed by the
-Volcengine Ark Responses API.
+KRYXstal is trace, audit, and coordination middleware for Volc Agent Launchpad.
+Like crystal, it makes opaque multi-Agent runs clear: one causal view connects
+the prompt, Agents, model runs, tool events, policy decisions, conflicts, and
+final result. Launchpad supplies Agent CRUD, browser Playground, persistent
+workspaces, and Codex CLI backed by Volcengine Ark Responses API.
 
 Run it locally with Docker, Colima, or rootless Podman, or deploy it to
 Volcengine ECS.
@@ -13,6 +15,64 @@ Volcengine ECS.
 > production secret manager, distributed store, or hardened multi-tenant
 > sandbox. Do not use production data or credentials. See
 > [SECURITY.md](SECURITY.md).
+
+## Selected track and rationale
+
+**Track: Glass Box — trace, audit, and observability.** Multi-Agent work crosses
+channels, runtimes, tools, and policy checks. Flat logs cannot quickly answer
+“Why did this Agent fail?” KRYXstal propagates a `traceId` and causal parent
+through that path, records runtime events and middleware decisions, and exposes
+one trace tree/timeline. Synchronisation conflicts and policy denials stay
+distinct, so operator sees both what happened and why.
+
+## One-page architecture
+
+```mermaid
+flowchart LR
+    Human([Human]) -->|prompt / approval| UI[React Playground<br/>trace tree + timeline]
+
+    subgraph TB["Trusted control-plane boundary"]
+        API[Fastify API<br/>validation + demo auth]
+        K["KRYXstal middleware<br/>trace correlation · audit · IAM · synchronisation"]
+        Service[AgentService<br/>lifecycle + scheduler]
+        Store[(JSON store<br/>messages · runs · events<br/>decisions · approvals)]
+        Hook[/PreToolUse + Agent MCP<br/>enforcement point/]
+
+        API --> K
+        K <--> Service
+        K -->|persist evidence| Store
+        Service --> Store
+        Hook -->|allow / deny decision| K
+    end
+
+    UI -->|HTTPS / JSON| API
+    API -->|trace + audit evidence| UI
+    Service -->|fresh config + short-lived token| Runtime
+
+    subgraph RB["Untrusted execution boundary"]
+        Runtime[Codex Runtime<br/>host process or disposable container]
+        Tools[Shell · files · MCP tools]
+        Runtime -->|tool intent| Hook
+        Hook -->|allowed calls only| Tools
+    end
+
+    Runtime -->|model request| Ark[Volcengine Ark<br/>Responses API]
+    Runtime -->|events + result| K
+    Tools -->|event / output / error| Runtime
+
+    classDef middleware fill:#e8ddff,stroke:#6d28d9,stroke-width:3px,color:#24103f;
+    classDef trust fill:#e8f5e9,stroke:#2e7d32,color:#17351a;
+    classDef untrusted fill:#fff3e0,stroke:#e65100,color:#4a2100;
+    class K middleware;
+    class API,Service,Store,Hook trust;
+    class Runtime,Tools untrusted;
+```
+
+Solid arrows show execution/data flow. KRYXstal is inside trusted control plane;
+Agent Runtime and tools are treated as untrusted. `PreToolUse` and Agent MCP
+callbacks are enforcement/instrumentation point: request fails closed when
+identity is invalid or control plane is unavailable. Ark credential stays in
+Runtime environment and never reaches browser.
 
 ## Screenshots
 
@@ -450,22 +510,47 @@ See [.env.example](.env.example) for all Runtime and resource-limit options.
 
 ## How it works
 
-```mermaid
-flowchart LR
-    UI["React Web UI"] --> API["Fastify control plane"]
-    API --> Store["JSON metadata and Agent workspaces"]
-    API --> Runtime{"Runtime provider"}
-    Runtime -->|Local POC| Container["Disposable Docker / Colima / Podman container"]
-    Runtime -->|ECS profile| Codex["Codex CLI in application container"]
-    Container --> Ark["Volcengine Ark Responses API"]
-    Codex --> Ark
-```
-
 The first turn uses `codex exec`; later turns resume the stored Codex thread.
 Deleting an Agent archives its workspace under `workspaces/.deleted/`.
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component and extension
+See [one-page architecture](#one-page-architecture) above and
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component details and extension
 boundaries.
+
+## KRYXstal tests and demo evidence
+
+Run focused middleware contract tests:
+
+```bash
+npm run test -w @launchpad/server -- src/kryxstal.test.ts
+```
+
+Tests prove both judge-facing paths:
+
+- normal case: prompt, Run, command event, allow decision, and reply share one
+  causal trace;
+- failure/denial case: blocked destructive command keeps deny reason and denial
+  message in same trace.
+
+For three-minute live demo:
+
+1. Send one Agent a normal task, open its trace, and show linked Run, event,
+   decision, and answer.
+2. Ask it to perform policy-blocked action such as `rm -rf /`; show protected
+   action did not run and inspect deny reason in same trace.
+3. Optional collaboration proof: run `@everyone count down from 10 to 1, one
+   number per message, take turns.` Show clean channel result, then conflicts
+   and regeneration in trace/audit view.
+
+## Known limitations
+
+- Single human and single-process JSON store; no tenancy or distributed locks.
+- Trace payloads may contain sensitive model/tool content; only HTTP auth and
+  cookie headers are redacted.
+- Local containers reduce blast radius but are not hardened multi-tenant
+  isolation.
+- Agent deletion removes Runs from active database; long-term audit is not
+  tamper-evident.
 
 ## Validation
 
