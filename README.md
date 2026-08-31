@@ -1,7 +1,7 @@
 # KRYXstal — clear middleware for Agent runs
 
 KRYXstal is trace, audit, and coordination middleware for Volc Agent Launchpad.
-Like crystal, it makes opaque multi-Agent runs clear: one causal view connects
+Inspired by crystals, it makes opaque multi-Agent runs clear: one causal view connects
 the prompt, Agents, model runs, tool events, policy decisions, conflicts, and
 final result. Launchpad supplies Agent CRUD, browser Playground, persistent
 workspaces, and Codex CLI backed by Volcengine Ark Responses API.
@@ -18,8 +18,8 @@ Volcengine ECS.
 
 ## Selected track and rationale
 
-**Track: Glass Box — trace, audit, and observability.** Multi-Agent work crosses
-channels, runtimes, tools, and policy checks. Flat logs cannot quickly answer
+**Track: Glass Box - trace, audit, and observability.** Multi-Agent work tends to go across
+channels, runtimes, tools, and policy checks. Simple, flat logs cannot quickly answer
 “Why did this Agent fail?” KRYXstal propagates a `traceId` and causal parent
 through that path, records runtime events and middleware decisions, and exposes
 one trace tree/timeline. Synchronisation conflicts and policy denials stay
@@ -76,13 +76,25 @@ Runtime environment and never reaches browser.
 
 ## Screenshots
 
-### Agent Playground
+### Agent Playground (w/ Audit Log)
 
-![Agent Playground showing lifecycle controls, starter prompts, and the Codex Runtime](docs/assets/playground.jpg)
+<img width="1378" height="874" alt="Screenshot_37" src="https://github.com/user-attachments/assets/34a1f986-46a7-4dcd-bdda-f862f6ab5e0b" />
 
 ### Create an Agent
 
-![Create Agent form with name, description, and workspace instructions](docs/assets/create-agent.jpg)
+<img width="1403" height="884" alt="Screenshot_38" src="https://github.com/user-attachments/assets/1470a00d-faad-4224-9835-e29c5226948a" />
+
+### Specify Agent Policies
+
+<img width="1398" height="885" alt="Screenshot_39" src="https://github.com/user-attachments/assets/d24e8b31-2cc1-46c9-9c36-d6347fc93c42" />
+
+### Specify Channel/Tool Access
+
+<img width="1407" height="884" alt="Screenshot_40" src="https://github.com/user-attachments/assets/6e1a1c40-4a61-45c1-81de-ff895625f3bb" />
+
+### Designated Approval channel
+
+<img width="1400" height="876" alt="Screenshot_41" src="https://github.com/user-attachments/assets/117192cb-e2de-4d6c-8694-741e6df05fd4" />
 
 ## Current features
 
