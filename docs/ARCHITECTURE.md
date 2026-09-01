@@ -4,27 +4,34 @@ Volc Agent Launchpad is a single-node control plane for hackathon use.
 
 ```mermaid
 flowchart LR
-    UI["React Web UI"] --> API["Fastify API"]
+    UI["React Web UI<br/>channels · traces · approvals · policy"] --> API["Fastify API<br/>validation · demo auth"]
     API --> Service["AgentService"]
-    Service --> Store["JSON store"]
+    Service --> Sync["IAM + synchronisation<br/>policy · locks · read cursors"]
+    Sync --> Store["JSON store<br/>runs · events · decisions · approvals"]
+    Service --> Store
     Service --> Workspace["Agent workspace"]
     Service --> Artefacts["Immutable review artefacts"]
+    Service --> Integrations["External MCP integrations<br/>shared or per-Agent OAuth"]
     Service --> Runner{"AgentRunner"}
     Runner -->|Local POC| Container["Disposable Runtime container"]
     Runner -->|ECS| Process["Codex child process"]
     Container --> Ark["Volcengine Ark"]
     Process --> Ark
-    Container -. "PreToolUse hook + MCP tools\n(AGENT_TOKEN)" .-> IAM["/api/iam, /api/agent"]
-    Process -. "PreToolUse hook + MCP tools" .-> IAM
-    IAM --> Service
+    Container -. "PreToolUse hook + Agent MCP\n(short-lived AGENT_TOKEN)" .-> Enforcement["/api/iam, /api/agent"]
+    Process -. "PreToolUse hook + Agent MCP" .-> Enforcement
+    Enforcement --> Sync
+    Integrations --> External["HTTP or stdio MCP servers"]
+    Runner -. "policy-filtered tool calls" .-> External
+    Runner -->|events + result| Service
 ```
 
 ## Components
 
 ### Web UI
 
-Lists Agents, manages lifecycle actions, submits prompts, and polls asynchronous
-Runs. It never receives the Ark API key.
+Manages Agents, policies, channels, approvals, integrations, and lifecycle
+actions; submits prompts; polls asynchronous Runs; and renders causal trace
+trees/timelines plus audit decisions. It never receives the Ark API key.
 
 ### Fastify API
 
@@ -34,8 +41,10 @@ serves the compiled Web UI. The token is not user identity or authorization.
 ### AgentService
 
 Coordinates lifecycle state, persistence, workspaces, channels, IAM decisions,
-sessions, approvals, and Runs. One Agent can have only one active Run; wakes
-that arrive while it is busy are queued and drained afterwards.
+per-channel synchronisation, sessions, capability grants, approvals, immutable
+review handoffs, external MCP configuration, causal traces, and Runs. One Agent
+can have only one active Run; wakes that arrive while it is busy are queued and
+drained afterwards.
 
 The IAM model (principals, sessions, policies, enforcement layers) is
 described in [MULTI_AGENT_IAM.md](MULTI_AGENT_IAM.md).
@@ -52,8 +61,8 @@ Interrupted Runs become `cancelled` after a restart.
 ### Storage
 
 ```text
-data/launchpad.json       Agents, channels, messages, Runs, decisions, approvals,
-                          review-artefact manifests
+data/launchpad.json       Agents, integrations, grants, channels, messages,
+                          Runs, decisions, approvals, review-artefact manifests
 data/review-artifacts/    Immutable published files and manifest copies
 workspaces/AgentID/       Agent-created files (+ generated AGENTS.md)
 workspaces/.deleted/      Archived deleted workspaces
@@ -80,8 +89,15 @@ mount a peer workspace; see [MULTI_AGENT_IAM.md](MULTI_AGENT_IAM.md#secure-revie
 Both providers use argv-only process execution, bound output and time, resume
 the stored Codex thread, and escalate termination after a grace period. Both
 receive the per-run `AGENT_TOKEN` and `LAUNCHPAD_URL` in the environment (never
-in argv) and stream Codex `command_execution`, `mcp_tool_call`, and
-`file_change` items back as Run events.
+in argv) and stream Codex command, MCP, file-change, web-search, and reasoning
+items back as Run events.
+
+Every turn receives freshly rendered tool exposure, execpolicy rules,
+`PreToolUse` hook configuration, sandbox/network settings, and external MCP
+allowlists. Tool intent is re-evaluated in the trusted control plane; channel
+writes additionally pass server-owned freshness and lock checks. See
+[MULTI_AGENT_IAM.md](MULTI_AGENT_IAM.md) and
+[SYNCHRONISATION.md](SYNCHRONISATION.md).
 
 ## Deployment profiles
 

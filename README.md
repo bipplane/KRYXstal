@@ -105,6 +105,9 @@ Runtime environment and never reaches browser.
 
 - Slack-shaped public, DM, and system channels.
 - `#general` and human-only `#approvals` bootstrapped automatically.
+- Humans and authorised Agents create public channels; humans can archive
+  ordinary public channels once active Runs and pending approvals finish.
+  `#general`, system channels, and DMs cannot be deleted.
 - Human, principal, session, and system authors; normal, system, denial,
   spawn, approval, and conflict messages.
 - DMs wake eligible members. Public channels wake `@name`, session slug,
@@ -232,6 +235,8 @@ for protocol, storage, limits, and threat boundary.
   synchronisation conflict.
 - Live events visible before completion; persisted events capped at 300 per
   Run and details clipped to 4,000 characters.
+- Decision history is globally capped at the newest 2,000 records; this POC
+  has no archival audit sink.
 - Agent inspector shows lifecycle, policy, channels, sessions, Runs, and
   decisions. Global inspector provides full audit view.
 - Fastify logs redact authorisation and cookie headers.
@@ -254,7 +259,8 @@ for protocol, storage, limits, and threat boundary.
 - First turn creates Codex thread; subsequent turns resume it.
 - Persistent per-Agent workspaces and Codex homes.
 - Configurable timeout and output byte ceiling.
-- Stop/cancel sends graceful termination then force kill/removal.
+- Stop/cancel terminates a host Codex process with `SIGTERM` then `SIGKILL`;
+  disposable container Runs are force-removed.
 - Restart reconciliation cancels orphaned Runs and resets busy Agents.
 - Synchronisation cursors rebuild from persisted Run/message state.
 - Run errors persist and post understandable channel notice.
@@ -477,7 +483,7 @@ docker compose down
 ```bash
 npm install
 cp .env.example .env
-npm install --global @openai/codex@0.111.0
+npm install --global @openai/codex@0.150.1
 npm run dev
 ```
 
@@ -521,9 +527,12 @@ cp deploy/volcengine/terraform.tfvars.example \
 | `ARK_MODEL` | Required | Responses-capable endpoint or model ID. |
 | `ARK_BASE_URL` | Beijing v3 endpoint | Ark OpenAI-compatible API URL. |
 | `APP_AUTH_TOKEN` | Empty on loopback | Shared demo token; use 24+ random characters remotely. |
+| `MODEL_PROVIDER` | `ark` | `local-codex` reuses an existing local Codex login for development. |
+| `CODEX_MODEL` | Codex CLI default | Optional model override in `local-codex` mode. |
 | `RUNTIME_PROVIDER` | `local-process` | `container` for disposable local Runtime containers. |
 | `CODEX_SANDBOX_MODE` | `workspace-write` | Codex inner sandbox mode. |
 | `CODEX_TIMEOUT_MS` | `600000` | Maximum duration of one turn. |
+| `CODEX_MAX_OUTPUT_BYTES` | `2097152` | Maximum captured Codex output per turn. |
 | `REVIEW_ARTIFACT_MAX_FILES` | `50` | Maximum files in one immutable review artefact. |
 | `REVIEW_ARTIFACT_MAX_TOTAL_BYTES` | `10485760` | Maximum total published bytes per review artefact. |
 | `REVIEW_ARTIFACT_MAX_RESPONSE_BYTES` | `1048576` | Maximum manifest or file-read response size. |
@@ -577,6 +586,8 @@ For three-minute live demo:
   isolation.
 - Agent deletion removes Runs from active database; long-term audit is not
   tamper-evident.
+- Decision retention is capped at 2,000 records and has no external audit
+  archive.
 - Review artefacts are local immutable snapshots with integrity checks, not a
   signed or externally durable evidence store; lifecycle cleanup is manual.
 

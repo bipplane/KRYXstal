@@ -183,6 +183,7 @@ indented timeline with channel hops marked.
 | `POST /api/agent/spawn` | `spawn_agent` | `agent:spawn` + delegation rules |
 | `POST /api/agent/close` | `close_agent` | `agent:close` + ancestor of target |
 | `POST /api/agent/requests` | `request_principal` | `principal:request` → `#approvals` |
+| `POST /api/agent/requests/capability` | `request_capability` | `capability:request` → working channel + `#approvals`; human grants once/forever or denies |
 | `POST /api/agent/review-artifacts` | `publish_for_review` | `artifact:publish`; source validation and limits |
 | `GET /api/agent/review-artifacts/:artifactId` | `read_review_artifact` | `artifact:read`; allowlist and hash verification |
 

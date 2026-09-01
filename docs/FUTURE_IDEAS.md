@@ -1,6 +1,6 @@
 # Future middleware ideas and implementation guardrails
 
-> Roadmap and design reference reviewed against repository commit `ecfc0a8`, 30 August 2026. Current implemented features live in the main [README](../README.md); this file contains only submission constraints, known gaps, future ideas, implementation plans, and anti-overfitting guardrails.
+> Roadmap and design reference reviewed against repository commit `96b345d`, 1 September 2026. Current implemented features live in the main [README](../README.md); this file contains only submission constraints, known gaps, future ideas, implementation plans, and anti-overfitting guardrails.
 
 Do not treat product examples as core requirements. Every idea inherits mandatory generality contract: domain-neutral core, explicit extension interfaces, backend invariants, and unrelated second fixture requiring zero core changes.
 
@@ -21,7 +21,6 @@ Current repository already covers large parts of recommended identity, authorisa
 These are not hidden implementation claims; they are future work or demo risks.
 
 - Single hard-coded human. Shared bearer token is gate, not identity, ownership, RBAC, CSRF protection, or tenant isolation.
-- `package.json` description still calls platform middleware-free. Update package metadata before submission.
 - JSON persistence is single-process; no database constraints, indexes, event replay, horizontal scale, retention jobs, or tamper evidence.
 - Runtime events are completion events, not full span protocol. Timestamps are receipt time; no stable span/parent IDs, latency phases, model attempt records, or cost conversion.
 - Trace/event/message content can contain sensitive data. Header log redaction exists, but general payload redaction/classification does not.
@@ -35,7 +34,9 @@ These are not hidden implementation claims; they are future work or demo risks.
 - Container network is broad bridge access. No destination allowlist, DNS policy, proxy, metadata endpoint protection, or byte limits.
 - ECS mode shares application container and offers weaker Agent isolation.
 - Agent session `expiresAt` exists but no expiry scheduler enforces it.
-- Session workspace separate from parent with no controlled artefact exchange.
+- Session workspaces remain separate. Immutable review artefacts provide
+  explicit snapshot handoff, but no mutable shared workspace, patch merge,
+  retention policy, or automatic artefact cleanup exists.
 - Pending wakes are in memory and coalesced to latest per channel; restart loses them and intermediate triggers may collapse.
 - Synchronisation locks/read cursors, conflict counters for ad-hoc runs, chatter counters, and trace notices are in memory. Cursors reconstruct approximately; other coordination state resets on restart.
 - Read correctness has pagination edge: wake prompt slices to 20 messages and `read_channel` honours caller limit, but both advance cursor to channel `lastSeq`. More than returned window can therefore be marked seen without reaching model.
