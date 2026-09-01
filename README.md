@@ -36,12 +36,14 @@ flowchart LR
         K["KRYXstal middleware<br/>trace correlation · audit · IAM · synchronisation"]
         Service[AgentService<br/>lifecycle + scheduler]
         Store[(JSON store<br/>messages · runs · events<br/>decisions · approvals)]
+        Artifacts[(Review artefacts<br/>immutable files + manifests)]
         Hook[/PreToolUse + Agent MCP<br/>enforcement point/]
 
         API --> K
         K <--> Service
         K -->|persist evidence| Store
         Service --> Store
+        Service --> Artifacts
         Hook -->|allow / deny decision| K
     end
 
@@ -148,8 +150,8 @@ See [Synchronisation](docs/SYNCHRONISATION.md) for protocol and invariants.
   otherwise.
 - Statements contain effect, globbed actions, and globbed resources.
 - Built-in actions cover channel read/post/create, shell execution, filesystem
-  writes, network, Agent spawn/close, principal requests, and capability
-  requests.
+  writes, network, Agent spawn/close, principal requests, capability requests,
+  and review-artefact publish/read.
 - External tools use namespaced actions `mcp:<server>:<tool>`.
 - Channel resources use `channel:<name>`; shell resources use token-prefix
   `cmd:<argv>` matching.
@@ -197,6 +199,25 @@ Additional controls:
 - Permanent grant removes covering deny and appends explicit allow.
 - Resolution, Decision, messages, and requester wake retain causal linkage.
 - Approval resolution is race-safe: concurrent clicks resolve exactly once.
+
+### Secure review-artefact handoff
+
+- Isolated Agent workspaces remain private; no peer workspace is mounted or
+  exposed through host paths.
+- A publishing Agent selects explicit regular files with `publish_for_review`.
+  Launchpad creates an immutable UUID artefact containing file hashes, sizes,
+  publisher Run/trace lineage, and an optional note.
+- A reviewing Agent lists the manifest, then reads only published paths through
+  `read_review_artifact`; every read revalidates manifest metadata, size, and
+  SHA-256.
+- IAM checks `artifact:publish` and exact `artifact:<id>` reads. Reader preset
+  must request scoped human approval before tool becomes available for its next
+  Run; worker preset may publish but not read.
+- Absolute paths, traversal, symlinks, directories, sensitive filenames, and
+  configured size/count excesses fail closed.
+
+See [Multi-agent IAM](docs/MULTI_AGENT_IAM.md#secure-review-artifact-handoff)
+for protocol, storage, limits, and threat boundary.
 
 ### Traces, Runs, and audit
 
@@ -254,7 +275,8 @@ Additional controls:
 ### Persistence, API, UI, and verification
 
 - Versioned JSON database for Agents, integrations, grants, channels, messages,
-  Runs, decisions, and approvals.
+  Runs, decisions, approvals, and review-artefact manifests; published bytes
+  live separately under `APP_DATA_DIR/review-artifacts/`.
 - Serial copy-on-write mutations and atomic temporary-file rename.
 - Mode `0600` for metadata and generated policy/config files.
 - v1→v2 migration plus idempotent message sequence assignment.
@@ -263,7 +285,8 @@ Additional controls:
   Runs, decisions, lifecycle, and runtime status.
 - Tests cover lifecycle, IAM, delegation, scheduler, synchronisation,
   concurrency, approval races, traces, integrations, runner/container protocol,
-  persistence/migration, hook/MCP runtime, and policy semantics.
+  persistence/migration, secure review handoff, hook/MCP runtime, and policy
+  semantics.
 - `npm run check` runs TypeScript checks, server tests, and production builds.
 
 Future designs and implementation guardrails live in
@@ -501,6 +524,9 @@ cp deploy/volcengine/terraform.tfvars.example \
 | `RUNTIME_PROVIDER` | `local-process` | `container` for disposable local Runtime containers. |
 | `CODEX_SANDBOX_MODE` | `workspace-write` | Codex inner sandbox mode. |
 | `CODEX_TIMEOUT_MS` | `600000` | Maximum duration of one turn. |
+| `REVIEW_ARTIFACT_MAX_FILES` | `50` | Maximum files in one immutable review artefact. |
+| `REVIEW_ARTIFACT_MAX_TOTAL_BYTES` | `10485760` | Maximum total published bytes per review artefact. |
+| `REVIEW_ARTIFACT_MAX_RESPONSE_BYTES` | `1048576` | Maximum manifest or file-read response size. |
 | `CHATTER_BUDGET` | `64` | Agent turns in one channel without a human message before it pauses. |
 | `TRACE_BUDGET` | `64` | Agent runs one human prompt may cause before its chain pauses. |
 | `TURN_TAKING` | `off` | `on` wakes the next collaborator round-robin instead of relying on `@everyone`. |
@@ -551,6 +577,8 @@ For three-minute live demo:
   isolation.
 - Agent deletion removes Runs from active database; long-term audit is not
   tamper-evident.
+- Review artefacts are local immutable snapshots with integrity checks, not a
+  signed or externally durable evidence store; lifecycle cleanup is manual.
 
 ## Validation
 

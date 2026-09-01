@@ -8,6 +8,7 @@ flowchart LR
     API --> Service["AgentService"]
     Service --> Store["JSON store"]
     Service --> Workspace["Agent workspace"]
+    Service --> Artefacts["Immutable review artefacts"]
     Service --> Runner{"AgentRunner"}
     Runner -->|Local POC| Container["Disposable Runtime container"]
     Runner -->|ECS| Process["Codex child process"]
@@ -51,7 +52,9 @@ Interrupted Runs become `cancelled` after a restart.
 ### Storage
 
 ```text
-data/launchpad.json       Agents, channels, messages, Runs, decisions, approvals
+data/launchpad.json       Agents, channels, messages, Runs, decisions, approvals,
+                          review-artefact manifests
+data/review-artifacts/    Immutable published files and manifest copies
 workspaces/AgentID/       Agent-created files (+ generated AGENTS.md)
 workspaces/.deleted/      Archived deleted workspaces
 codex-home/agents/ID/     Per-agent Codex home: generated config.toml,
@@ -61,6 +64,12 @@ runtime/                  MCP channel server and IAM hook run inside the Runtime
 
 `JsonStore` serializes writes and atomically replaces one JSON file. It supports
 one process only.
+
+`ReviewArtifactStorage` copies only explicitly listed regular files from one
+Agent workspace into private staging, rejects traversal, links and sensitive
+paths, then atomically publishes a UUID directory. Reads require scoped IAM,
+use manifest allowlists, and recheck size and SHA-256. Artefacts never expose or
+mount a peer workspace; see [MULTI_AGENT_IAM.md](MULTI_AGENT_IAM.md#secure-review-artifact-handoff).
 
 ### Runtime providers
 

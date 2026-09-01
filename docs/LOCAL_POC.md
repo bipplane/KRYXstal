@@ -35,6 +35,11 @@ Each turn mounts only the selected Agent workspace and Codex session directory.
 Default limits are 2 CPUs, 2 GiB memory, 256 processes, dropped capabilities,
 and `no-new-privileges`.
 
+Review handoffs do not add cross-workspace mounts. Explicitly published files
+are copied into `APP_DATA_DIR/review-artifacts/`; reviewing Agents access them
+only through scoped control-plane tools. Preserve this directory with
+`launchpad.json` when backing up state.
+
 Codex requests `workspace-write`. If the Linux kernel lacks Landlock, startup
 warns and disables only the inner Codex sandbox. The outer container limits
 remain active, but this fallback is not tenant isolation.

@@ -21,6 +21,7 @@ describe("IAM evaluation", () => {
     expect(evaluate(policy, "net:access", "web").effect).toBe("deny");
     expect(evaluate(policy, "channel:post", "channel:general").effect).toBe("allow");
     expect(evaluate(presetPolicy("reader"), "channel:post", "channel:general").effect).toBe("deny");
+    expect(evaluate(presetPolicy("reader"), "artifact:read", "artifact:any-id").effect).toBe("deny");
     expect(evaluate(presetPolicy("custom"), "channel:read", "channel:general")).toMatchObject({
       effect: "deny",
       reason: expect.stringContaining("No statement"),

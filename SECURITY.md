@@ -20,6 +20,8 @@ credentials, personal data, or exploit details in an issue.
 - Prompt-triggered command and file execution
 - Ark key available to the server and active Runtime container
 - Ark key stored in Terraform POC state
+- Review artefacts are integrity-checked local snapshots, not signed or
+  tamper-evident external records, and have no automatic retention cleanup
 
 ## Safe use
 
@@ -28,6 +30,9 @@ credentials, personal data, or exploit details in an issue.
 - Keep local use on loopback and restrict ECS Web and SSH CIDRs.
 - Add HTTPS before sending the shared token over an untrusted network.
 - Never mount production data or provide Volcengine account AK/SK to Agents.
+- Publish only intended source/test files. Review handoff rejects common secret
+  paths and symlinks, but filename filtering cannot classify every sensitive
+  value embedded in an otherwise ordinary file.
 - Stop the POC, destroy test resources, and revoke keys after the event.
 
 Codex uses `workspace-write` when Landlock is available. On unsupported kernels,
