@@ -119,6 +119,11 @@ docker compose --env-file .env.production ps
 
 Deploy updates with `git pull --ff-only`, then rerun the deployment script.
 
+Persistent application data includes both `launchpad.json` metadata and
+`review-artifacts/` immutable handoff files under `APP_DATA_DIR`. Back up or
+migrate both together; manifests without files, or files without matching
+metadata, fail integrity checks.
+
 ### Network and cleanup
 
 - Allow TCP 80 only from the event network.

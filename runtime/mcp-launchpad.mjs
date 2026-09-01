@@ -128,6 +128,38 @@ const TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: "publish_for_review",
+    description:
+      "Publish selected regular files from your isolated workspace as one immutable review artifact. " +
+      "Post the returned artifact ID to the Reviewer; sensitive files, links, traversal, and host paths are rejected.",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    inputSchema: {
+      type: "object",
+      properties: {
+        paths: { type: "array", minItems: 1, items: { type: "string" }, description: "Paths relative to your workspace" },
+        note: { type: "string", description: "Optional review context" },
+      },
+      required: ["paths"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "read_review_artifact",
+    description:
+      "List a review artifact manifest or read one exact published file after integrity verification. " +
+      "Omit path to list the manifest and files.",
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    inputSchema: {
+      type: "object",
+      properties: {
+        artifact_id: { type: "string", format: "uuid" },
+        path: { type: "string", description: "Optional exact relative path from the manifest" },
+      },
+      required: ["artifact_id"],
+      additionalProperties: false,
+    },
+  },
 ];
 
 TOOLS.push({
@@ -168,6 +200,12 @@ const ROUTES = {
   close_agent: (args) => ["POST", "/api/agent/close", { agentId: args.agent_id }],
   request_principal: (args) => ["POST", "/api/agent/requests", args],
   request_capability: (args) => ["POST", "/api/agent/requests/capability", args],
+  publish_for_review: (args) => ["POST", "/api/agent/review-artifacts", args],
+  read_review_artifact: (args) => [
+    "GET",
+    "/api/agent/review-artifacts/" + encodeURIComponent(args.artifact_id) +
+      (args.path === undefined ? "" : "?path=" + encodeURIComponent(args.path)),
+  ],
 };
 
 async function callControlPlane(method, route, body) {

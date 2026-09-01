@@ -24,6 +24,7 @@ import {
   USER_POLICY,
 } from "./policy.js";
 import { assignSequenceNumbers, JsonStore, legacyDmChannelId } from "./store.js";
+import { ReviewArtifactStorage } from "./review-artifacts.js";
 import {
   channelHead,
   channelKey,
@@ -59,6 +60,7 @@ import type {
   RunnerResult,
   Trace,
   UpdateAgentInput,
+  ReviewArtifactManifest,
 } from "./types.js";
 import { WorkspaceManager, type InstructionContext } from "./workspace.js";
 import type { IntegrationService } from "./integration-service.js";
@@ -155,6 +157,7 @@ interface TraceContext {
 }
 
 export class AgentService {
+  private readonly reviewArtifactStorage: ReviewArtifactStorage;
   private readonly activeExecutions = new Map<string, Promise<void>>();
   private readonly cancellationRequests = new Set<string>();
   private readonly tokens = new Map<string, RunIdentity>();
@@ -173,13 +176,16 @@ export class AgentService {
     private readonly runner: AgentRunner,
     private readonly integrations: IntegrationService | null = null,
     private readonly sync: SyncBackend = createInMemorySync(),
-  ) {}
+  ) {
+    this.reviewArtifactStorage = new ReviewArtifactStorage(config);
+  }
 
   // ---------------------------------------------------------------- lifecycle
 
   async initialize(): Promise<void> {
     await this.store.initialize();
     await this.workspaces.initialize();
+    await this.reviewArtifactStorage.initialize();
     await mkdir(path.dirname(agentCodexHome(this.config, "x")), { recursive: true });
     await this.store.mutate((database) => {
       for (const run of database.runs) {
@@ -193,6 +199,29 @@ export class AgentService {
         if (agent.status === "busy") {
           agent.status = "ready";
           agent.updatedAt = now();
+        }
+        // Reconcile narrowly changed built-in artefact defaults without touching custom policies
+        // or overriding an explicit deny. Human allow-forever grants are `custom` and survive.
+        if (agent.policy.preset === "reader") {
+          agent.policy.statements = agent.policy.statements
+            .map((statement) =>
+              statement.effect === "allow"
+                ? { ...statement, actions: statement.actions.filter((action) => action !== "artifact:read") }
+                : statement,
+            )
+            .filter((statement) => statement.actions.length > 0);
+        }
+        if (
+          (agent.policy.preset === "worker" || agent.policy.preset === "deployer") &&
+          evaluate(agent.policy, "artifact:publish", "artifact:*").statement === null
+        ) {
+          agent.policy.statements.push({ effect: "allow", actions: ["artifact:publish"], resources: ["artifact:*"] });
+        }
+        if (
+          agent.policy.preset === "deployer" &&
+          evaluate(agent.policy, "artifact:read", "artifact:*").statement === null
+        ) {
+          agent.policy.statements.push({ effect: "allow", actions: ["artifact:read"], resources: ["artifact:*"] });
         }
       }
       for (const message of database.messages) {
@@ -211,6 +240,7 @@ export class AgentService {
       for (const decision of database.decisions) decision.traceId ??= null;
       database.integrations ??= [];
       database.grants ??= [];
+      database.reviewArtifacts ??= [];
       for (const agent of database.agents) agent.ownIntegrationIds ??= [];
       for (const approval of database.approvals) {
         approval.kind ??= "create_principal";
@@ -1357,6 +1387,41 @@ export class AgentService {
     const messages = this.getMessages(channel.id, limit);
     this.sync.reads.advance(agent.id, channelKey(channel.id), this.getChannel(channel.id).lastSeq);
     return messages;
+  }
+
+  async agentPublishForReview(
+    identity: RunIdentity,
+    input: { paths: string[]; note?: string | undefined },
+  ): Promise<ReviewArtifactManifest> {
+    const agent = this.getAgent(identity.agentId);
+    await this.authorize(agent, identity.runId, "publish_for_review", "artifact:publish", "artifact:*");
+    const manifest = await this.reviewArtifactStorage.publish({
+      workspacePath: agent.workspacePath,
+      agentId: agent.id,
+      runId: identity.runId,
+      traceId: this.traceOfRun(identity.runId).traceId ?? null,
+      paths: input.paths,
+      note: input.note,
+    });
+    await this.store.mutate((database) => {
+      if (database.reviewArtifacts.some((artifact) => artifact.artifactId === manifest.artifactId)) {
+        throw new HttpError(409, "Review artifact already exists");
+      }
+      database.reviewArtifacts.push(manifest);
+    });
+    return structuredClone(manifest);
+  }
+
+  async agentReadReviewArtifact(
+    identity: RunIdentity,
+    artifactId: string,
+    requestedPath?: string | undefined,
+  ): Promise<Record<string, unknown>> {
+    const agent = this.getAgent(identity.agentId);
+    await this.authorize(agent, identity.runId, "read_review_artifact", "artifact:read", "artifact:" + artifactId);
+    const manifest = this.store.peek().reviewArtifacts.find((artifact) => artifact.artifactId === artifactId);
+    if (!manifest) throw new HttpError(404, "Review artifact not found");
+    return this.reviewArtifactStorage.read(structuredClone(manifest), requestedPath);
   }
 
   async agentPostMessage(

@@ -161,4 +161,44 @@ describe("mcp-launchpad.mjs", () => {
     ]);
     expect(plane.seen.every((seen) => seen.auth === "Bearer tok")).toBe(true);
   });
+
+  it("publishes and reads review artifacts through exact control-plane routes", async () => {
+    const plane = await fakeControlPlane((seen) => ({ body: { ok: true, seen: seen.path } }));
+    const artifactId = "11111111-1111-4111-8111-111111111111";
+    const calls = [
+      { jsonrpc: "2.0", id: 1, method: "tools/list" },
+      {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "publish_for_review", arguments: { paths: ["src/a.ts"], note: "review" } },
+      },
+      {
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "read_review_artifact", arguments: { artifact_id: artifactId, path: "src/a.ts" } },
+      },
+    ];
+    const result = await runScript(
+      "mcp-launchpad.mjs",
+      { LAUNCHPAD_URL: plane.url, AGENT_TOKEN: "tok" },
+      calls.map((call) => JSON.stringify(call)).join("\n") + "\n",
+    );
+    const responses = result.stdout.trim().split("\n").map((line) => JSON.parse(line));
+    const tools = responses.find((response) => response.id === 1).result.tools as Array<{ name: string }>;
+    expect(tools.map((tool) => tool.name)).toEqual(expect.arrayContaining(["publish_for_review", "read_review_artifact"]));
+    expect(plane.seen).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        method: "POST",
+        path: "/api/agent/review-artifacts",
+        body: { paths: ["src/a.ts"], note: "review" },
+      }),
+      expect.objectContaining({
+        method: "GET",
+        path: "/api/agent/review-artifacts/" + artifactId + "?path=src%2Fa.ts",
+        body: null,
+      }),
+    ]));
+  });
 });

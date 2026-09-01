@@ -90,6 +90,12 @@ const requestPrincipalBody = z.object({
   preset: z.enum(["reader", "worker", "deployer", "admin"]),
   channels: z.array(z.string().trim().min(1).max(60)).max(50).optional(),
 });
+const publishArtifactBody = z.object({
+  paths: z.array(z.string().min(1).max(1_000)).min(1).max(1_000),
+  note: z.string().max(10_000).optional(),
+});
+const artifactParams = z.object({ artifactId: z.string().uuid() });
+const readArtifactQuery = z.object({ path: z.string().min(1).max(1_000).optional() });
 
 function bearer(request: FastifyRequest): string {
   const header = request.headers.authorization ?? "";
@@ -376,6 +382,20 @@ export async function createApp(
       approval: { id: approval.id, status: approval.status },
       note: "Posted to #approvals. The human decides; you will be notified in your DM channel.",
     });
+  });
+
+  app.post("/api/agent/review-artifacts", async (request, reply) => {
+    const identity = identityOf(request);
+    const body = publishArtifactBody.parse(request.body);
+    const manifest = await service.agentPublishForReview(identity, body);
+    return reply.code(201).send({ artifactId: manifest.artifactId, manifest });
+  });
+
+  app.get("/api/agent/review-artifacts/:artifactId", async (request) => {
+    const identity = identityOf(request);
+    const { artifactId } = artifactParams.parse(request.params);
+    const query = readArtifactQuery.parse(request.query);
+    return service.agentReadReviewArtifact(identity, artifactId, query.path);
   });
 
   // -------------------------------------------------------------- static UI

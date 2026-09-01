@@ -16,6 +16,8 @@ export const MCP_TOOL_ACTIONS: Record<string, string> = {
   close_agent: "agent:close",
   request_principal: "principal:request",
   request_capability: "capability:request",
+  publish_for_review: "artifact:publish",
+  read_review_artifact: "artifact:read",
 };
 
 export interface ExternalMcpServer {
@@ -177,7 +179,12 @@ async function linkLocalAuth(dir: string, localCodexHome: string): Promise<void>
     );
   }
   await unlink(target).catch(() => undefined);
-  await symlink(source, target);
+  try {
+    await symlink(source, target);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
+    await copyFile(source, target);
+  }
 }
 
 /** Writes config.toml, rules/policy.rules and hooks.json for one agent. */

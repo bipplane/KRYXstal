@@ -2,7 +2,7 @@
   "name": "volc-agent-launchpad",
   "version": "1.0.0",
   "private": true,
-  "description": "A middleware-free Agent platform starter kit running Codex CLI locally or on Volcengine ECS.",
+  "description": "KRYXstal trace, audit, and coordination middleware for clear Agent runs.",
   "type": "module",
   "workspaces": [
     "apps/*"

@@ -276,6 +276,7 @@ describe("Channel synchronisation: automatic reply", () => {
     expect(secondPrompt).toContain("[no reply]");
     expect(service.getAgent(a.id).status).toBe("ready");
     expect(service.getAgent(b.id).status).toBe("ready");
+    await expect.poll(() => service.getDecisions().filter((d) => d.tool === "auto_post").length).toBe(3);
     const rows = service.getDecisions().filter((d) => d.tool === "auto_post");
     expect(rows.map((d) => d.agentName + ":" + d.effect).sort()).toEqual([
       "AgentA:allow",

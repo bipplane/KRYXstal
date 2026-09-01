@@ -21,6 +21,7 @@ describe("IAM evaluation", () => {
     expect(evaluate(policy, "net:access", "web").effect).toBe("deny");
     expect(evaluate(policy, "channel:post", "channel:general").effect).toBe("allow");
     expect(evaluate(presetPolicy("reader"), "channel:post", "channel:general").effect).toBe("deny");
+    expect(evaluate(presetPolicy("reader"), "artifact:read", "artifact:any-id").effect).toBe("deny");
     expect(evaluate(presetPolicy("custom"), "channel:read", "channel:general")).toMatchObject({
       effect: "deny",
       reason: expect.stringContaining("No statement"),
@@ -133,6 +134,14 @@ describe("Tool call mapping", () => {
     expect(mapToolCall("mcp__launchpad__spawn_agent", {})).toEqual({
       action: "agent:spawn",
       resource: "*",
+    });
+    expect(mapToolCall("mcp__launchpad__publish_for_review", { paths: ["src/a.ts"] })).toEqual({
+      action: "artifact:publish",
+      resource: "artifact:*",
+    });
+    expect(mapToolCall("mcp__launchpad__read_review_artifact", { artifact_id: "artifact-id" })).toEqual({
+      action: "artifact:read",
+      resource: "artifact:artifact-id",
     });
     expect(mapToolCall("update_plan", {})).toBeNull();
     expect(mapToolCall("mcp__linear__create_issue", { title: "x" })).toEqual({

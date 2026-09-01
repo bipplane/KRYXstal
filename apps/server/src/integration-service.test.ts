@@ -84,7 +84,7 @@ describe("IntegrationService", () => {
       delegable: [],
     };
     const [view] = service.forAgent(agentWith(reader));
-    expect(view?.enabledTools?.sort()).toEqual(["list_channels", "read_channel"]);
+    expect(view?.enabledTools?.sort()).toEqual(["list_channels", "read_channel", "read_review_artifact"]);
     expect(service.forAgent(agentWith(presetPolicy("admin")))[0]?.enabledTools).toContain("post_message");
 
     await expect(service.create({ name: "chan", kind: "stdio", command: "x" })).rejects.toMatchObject({ statusCode: 409 });
@@ -93,7 +93,7 @@ describe("IntegrationService", () => {
     expect(service.list()).toEqual([]);
   });
 
-  it("runs codex mcp login, returns the authorize URL, and marks the integration connected", async () => {
+  it.skipIf(process.platform === "win32")("runs codex mcp login, returns the authorize URL, and marks the integration connected", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "fake-codex-"));
     temporaryDirectories.push(root);
     const fake = path.join(root, "codex");
